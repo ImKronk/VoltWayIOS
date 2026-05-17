@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "VoltWay",
+    "slug": "voltwayrn",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "voltway",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#E7F6F2"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.voltway.app"
+    },
+    "android": {
+      "package": "com.voltway.app"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "A VoltWay usa a tua localizacao para mostrar postos de carregamento proximos e calcular rotas."
+        }
+      ]
+    ]
+  }
+}
