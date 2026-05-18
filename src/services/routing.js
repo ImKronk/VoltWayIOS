@@ -120,8 +120,8 @@ export function findOptimalStop(destination, opts) {
   };
 }
 
-// Calls OpenRouteService and returns map-ready polyline coords + summary.
-// `waypoints` is an array of [lng, lat] pairs.
+// Calls OpenRouteService and returns map-ready polyline coords + summary +
+// turn-by-turn steps. `waypoints` is an array of [lng, lat] pairs.
 export async function fetchRoute(waypoints, orsKey) {
   const res = await fetch('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
     method: 'POST',
@@ -130,7 +130,7 @@ export async function fetchRoute(waypoints, orsKey) {
       'Content-Type': 'application/json',
       Accept: 'application/geo+json',
     },
-    body: JSON.stringify({ coordinates: waypoints }),
+    body: JSON.stringify({ coordinates: waypoints, language: 'pt', instructions: true }),
   });
   if (!res.ok) {
     const t = await res.text();
@@ -147,7 +147,30 @@ export async function fetchRoute(waypoints, orsKey) {
   const totalMin = Math.round(summary.duration / 60);
   const durationText =
     totalMin >= 60 ? `${Math.floor(totalMin / 60)}h ${totalMin % 60}min` : `${totalMin} min`;
-  return { coords, distanceText, durationText, distanceKm: distKm };
+
+  // Flatten turn-by-turn steps from every segment (way_points index `coords`).
+  const steps = [];
+  for (const seg of feature.properties.segments || []) {
+    for (const st of seg.steps || []) {
+      steps.push({
+        instruction: st.instruction,
+        name: st.name && st.name !== '-' ? st.name : '',
+        distance: st.distance,
+        type: st.type,
+        wayPoint: st.way_points ? st.way_points[0] : 0,
+      });
+    }
+  }
+
+  return {
+    coords,
+    distanceText,
+    durationText,
+    distanceKm: distKm,
+    distanceM: summary.distance,
+    durationSec: summary.duration,
+    steps,
+  };
 }
 
 // One-shot helper used by both the map search and the route screen.

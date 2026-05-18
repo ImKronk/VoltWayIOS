@@ -1,7 +1,7 @@
 // Map screen — Apple Maps + station markers + draggable bottom sheet.
 // Ports #screen-map (map, bottom sheet, search, chips, station list).
 import React, { useRef, useMemo, useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Keyboard } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetFlatList, BottomSheetTextInput } from '@gorhom/bottom-sheet';
 import * as Location from 'expo-location';
@@ -14,6 +14,8 @@ import { stationSupportsConnector } from '../utils/connectors';
 import { haversineKm } from '../utils/geo';
 import { freeInMinutes } from '../services/stationStatus';
 import { planRoute } from '../services/routing';
+import { autocompleteAddress } from '../services/geocode';
+import { loadRecentSearches, addRecentSearch } from '../services/recentSearches';
 import RouteInfoCard from '../components/RouteInfoCard';
 import SideMenu from '../components/SideMenu';
 import VehicleEditSheet from '../components/VehicleEditSheet';
@@ -27,15 +29,21 @@ const CHIPS = [
 ];
 
 // Stations within this radius (km) of the user can be reported.
-const REPORT_RADIUS_KM = 5;
+const REPORT_RADIUS_KM = 0.8;
+const REPORT_RADIUS_LABEL =
+  REPORT_RADIUS_KM < 1 ? `${REPORT_RADIUS_KM * 1000} m` : `${REPORT_RADIUS_KM} km`;
 
 export default function MapScreen({ navigation }) {
   const app = useApp();
   const mapRef = useRef(null);
   const sheetRef = useRef(null);
+  const searchDebounce = useRef(null);
   const snapPoints = useMemo(() => ['18%', '56%', '92%'], []);
   const insets = useSafeAreaInsets();
   const [search, setSearch] = useState('');
+  const [suggestions, setSuggestions] = useState([]);
+  const [recentSearches, setRecentSearches] = useState([]);
+  const [searchFocused, setSearchFocused] = useState(false);
   const [chip, setChip] = useState('all');
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -80,6 +88,11 @@ export default function MapScreen({ navigation }) {
     }
   }, [route]);
 
+  // Load the persisted search history once.
+  useEffect(() => {
+    loadRecentSearches().then(setRecentSearches);
+  }, []);
+
   const recenter = useCallback(() => {
     mapRef.current?.animateToRegion(
       { latitude: location.lat, longitude: location.lng, latitudeDelta: 0.08, longitudeDelta: 0.08 },
@@ -94,7 +107,7 @@ export default function MapScreen({ navigation }) {
     setReportStation(null);
     sheetRef.current?.snapToIndex(0);
     mapRef.current?.animateToRegion(
-      { latitude: location.lat, longitude: location.lng, latitudeDelta: 0.1, longitudeDelta: 0.1 },
+      { latitude: location.lat, longitude: location.lng, latitudeDelta: 0.018, longitudeDelta: 0.018 },
       500,
     );
   }, [location]);
@@ -113,20 +126,11 @@ export default function MapScreen({ navigation }) {
     [reportMode, navigation],
   );
 
-  async function doSearch() {
-    const q = search.trim();
-    if (q.length < 3) {
-      Alert.alert('Pesquisa', 'Escreve um destino com pelo menos 3 letras.');
-      return;
-    }
+  // Calculates and shows the route to a destination, applying the EV rules
+  // (battery range, connector filter, optimal/emergency charging stop).
+  async function routeTo(destination) {
     setBusy(true);
     try {
-      const results = await Location.geocodeAsync(q);
-      if (!results || !results.length) {
-        Alert.alert('Destino', 'Não foi possível encontrar esse local.');
-        return;
-      }
-      const destination = { lat: results[0].latitude, lng: results[0].longitude, name: q };
       const res = await planRoute(destination, {
         stations,
         origin: location,
@@ -139,10 +143,60 @@ export default function MapScreen({ navigation }) {
         return;
       }
       setRoute(res.route);
+      addRecentSearch(recentSearches, destination).then(setRecentSearches);
       refreshStationsNear(destination.lat, destination.lng);
       sheetRef.current?.snapToIndex(0);
     } catch (e) {
       Alert.alert('Erro', e.message || 'Falha ao calcular a rota.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Live address autocomplete (OpenRouteService geocoding), debounced.
+  function onSearchChange(text) {
+    setSearch(text);
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    if (text.trim().length < 3) {
+      setSuggestions([]);
+      return;
+    }
+    searchDebounce.current = setTimeout(async () => {
+      const results = await autocompleteAddress(text, keys.ors, location);
+      setSuggestions(results);
+    }, 300);
+  }
+
+  // The user picked an address suggestion -> route straight to it.
+  function pickSuggestion(sug) {
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    setSearch(sug.name);
+    setSuggestions([]);
+    Keyboard.dismiss();
+    routeTo({ lat: sug.lat, lng: sug.lng, name: sug.name });
+  }
+
+  // Keyboard "search" key: use the top suggestion, else the device geocoder.
+  async function doSearch() {
+    const q = search.trim();
+    if (q.length < 3) {
+      Alert.alert('Pesquisa', 'Escreve um destino com pelo menos 3 letras.');
+      return;
+    }
+    if (suggestions.length) {
+      pickSuggestion(suggestions[0]);
+      return;
+    }
+    setBusy(true);
+    try {
+      const results = await Location.geocodeAsync(q);
+      if (!results || !results.length) {
+        Alert.alert('Destino', 'Não foi possível encontrar esse local.');
+        return;
+      }
+      await routeTo({ lat: results[0].latitude, lng: results[0].longitude, name: q });
+    } catch (e) {
+      Alert.alert('Erro', e.message || 'Falha na pesquisa.');
     } finally {
       setBusy(false);
     }
@@ -154,45 +208,93 @@ export default function MapScreen({ navigation }) {
         <Text style={styles.searchIcon}>🔍</Text>
         <BottomSheetTextInput
           value={search}
-          onChangeText={setSearch}
+          onChangeText={onSearchChange}
           placeholder="Para onde vais?"
           placeholderTextColor={colors.c3}
           style={styles.searchInput}
           returnKeyType="search"
           onSubmitEditing={doSearch}
+          onFocus={() => {
+            setSearchFocused(true);
+            sheetRef.current?.snapToIndex(2);
+          }}
+          onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
         />
         {busy ? <ActivityIndicator size="small" color={colors.c2} /> : null}
       </View>
 
-      <View style={styles.chipsRow}>
-        {CHIPS.map((c) => {
-          const active = chip === c.key;
-          return (
+      {suggestions.length > 0 ? (
+        <View style={styles.suggestBox}>
+          {suggestions.map((sug, i) => (
             <TouchableOpacity
-              key={c.key}
-              style={[styles.chip, active && styles.chipActive]}
-              onPress={() => setChip(c.key)}
+              key={`${sug.lat},${sug.lng},${i}`}
+              style={[styles.suggestRow, i > 0 && styles.suggestRowBorder]}
+              onPress={() => pickSuggestion(sug)}
+              activeOpacity={0.6}
             >
-              <Text style={[styles.chipText, active && styles.chipTextActive]}>{c.label}</Text>
+              <Text style={styles.suggestIcon}>📍</Text>
+              <Text style={styles.suggestTxt} numberOfLines={2}>{sug.name}</Text>
             </TouchableOpacity>
-          );
-        })}
-      </View>
-
-      <TouchableOpacity style={styles.predBanner} onPress={() => navigation.navigate('Prediction')}>
-        <View style={styles.predIconBox}>
-          <Text style={styles.predIconTxt}>🔮</Text>
+          ))}
         </View>
-        <Text style={styles.predTxt} numberOfLines={1}>Posto livre em ~20 min</Text>
-        <Text style={styles.predPct}>75%</Text>
-        <Text style={styles.predArrow}>›</Text>
-      </TouchableOpacity>
+      ) : null}
 
-      <Text style={styles.sectionTitle}>
-        {reportMode
-          ? `ESCOLHE UM POSTO  ·  ${inRange.length}`
-          : `${route ? 'POSTOS COMPATÍVEIS' : 'POSTOS PERTO'}  ·  ${visible.length}`}
-      </Text>
+      {searchFocused && suggestions.length === 0 ? (
+        recentSearches.length > 0 ? (
+          <View style={styles.suggestBox}>
+            <Text style={styles.historyLabel}>RECENTES</Text>
+            {recentSearches.map((r, i) => (
+              <TouchableOpacity
+                key={`${r.lat},${r.lng},${i}`}
+                style={[styles.suggestRow, styles.suggestRowBorder]}
+                onPress={() => pickSuggestion(r)}
+                activeOpacity={0.6}
+              >
+                <Text style={styles.suggestIcon}>🕘</Text>
+                <Text style={styles.suggestTxt} numberOfLines={1}>{r.name}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : (
+          <Text style={styles.searchHint}>
+            As tuas pesquisas recentes vão aparecer aqui.
+          </Text>
+        )
+      ) : null}
+
+      {!searchFocused ? (
+        <>
+          <View style={styles.chipsRow}>
+            {CHIPS.map((c) => {
+              const active = chip === c.key;
+              return (
+                <TouchableOpacity
+                  key={c.key}
+                  style={[styles.chip, active && styles.chipActive]}
+                  onPress={() => setChip(c.key)}
+                >
+                  <Text style={[styles.chipText, active && styles.chipTextActive]}>{c.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <TouchableOpacity style={styles.predBanner} onPress={() => navigation.navigate('Prediction')}>
+            <View style={styles.predIconBox}>
+              <Text style={styles.predIconTxt}>🔮</Text>
+            </View>
+            <Text style={styles.predTxt} numberOfLines={1}>Posto livre em ~20 min</Text>
+            <Text style={styles.predPct}>75%</Text>
+            <Text style={styles.predArrow}>›</Text>
+          </TouchableOpacity>
+
+          <Text style={styles.sectionTitle}>
+            {reportMode
+              ? `ESCOLHE UM POSTO  ·  ${inRange.length}`
+              : `${route ? 'POSTOS COMPATÍVEIS' : 'POSTOS PERTO'}  ·  ${visible.length}`}
+          </Text>
+        </>
+      ) : null}
     </View>
   );
 
@@ -280,7 +382,7 @@ export default function MapScreen({ navigation }) {
           <Text style={styles.reportBannerTxt} numberOfLines={1}>
             {inRange.length
               ? '📢 Toca num posto para reportar'
-              : `📢 Sem postos a menos de ${REPORT_RADIUS_KM} km`}
+              : `📢 Sem postos a menos de ${REPORT_RADIUS_LABEL}`}
           </Text>
           <TouchableOpacity onPress={exitReport} hitSlop={10}>
             <Text style={styles.reportBannerX}>✕</Text>
@@ -288,7 +390,13 @@ export default function MapScreen({ navigation }) {
         </View>
       ) : null}
 
-      {route ? <RouteInfoCard route={route} onClear={clearRoute} /> : null}
+      {route ? (
+        <RouteInfoCard
+          route={route}
+          onClear={clearRoute}
+          onStart={() => navigation.navigate('Navigation')}
+        />
+      ) : null}
 
       {loading ? (
         <View style={styles.loadingPill}>
@@ -319,17 +427,20 @@ export default function MapScreen({ navigation }) {
         handleIndicatorStyle={styles.sheetHandle}
       >
         <BottomSheetFlatList
-          data={displayed}
+          data={searchFocused ? [] : displayed}
           keyExtractor={(s) => String(s.id)}
+          keyboardShouldPersistTaps="handled"
           ListHeaderComponent={ListHeader}
-          ListFooterComponent={reportMode ? null : ListFooter}
+          ListFooterComponent={searchFocused || reportMode ? null : ListFooter}
           contentContainerStyle={{ paddingBottom: 36 }}
           ListEmptyComponent={
-            <Text style={styles.empty}>
-              {reportMode
-                ? `Nenhum posto num raio de ${REPORT_RADIUS_KM} km de ti.`
-                : 'Nenhum posto compatível com o teu conector nesta área.'}
-            </Text>
+            searchFocused ? null : (
+              <Text style={styles.empty}>
+                {reportMode
+                  ? `Nenhum posto num raio de ${REPORT_RADIUS_LABEL} de ti.`
+                  : 'Nenhum posto compatível com o teu conector nesta área.'}
+              </Text>
+            )
           }
           renderItem={({ item: s }) => {
             const freeIn = s.status === 'occupied' ? freeInMinutes(s) : null;
@@ -505,6 +616,43 @@ const styles = StyleSheet.create({
   },
   searchIcon: { fontSize: 19 },
   searchInput: { flex: 1, fontSize: 17, color: colors.c1, padding: 0, fontWeight: '500' },
+
+  suggestBox: {
+    marginHorizontal: 16,
+    marginTop: -4,
+    marginBottom: 14,
+    backgroundColor: colors.card,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: colors.c3,
+    overflow: 'hidden',
+  },
+  suggestRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  suggestRowBorder: { borderTopWidth: 1, borderTopColor: colors.c4 },
+  suggestIcon: { fontSize: 16 },
+  suggestTxt: { flex: 1, fontSize: 14, color: colors.c1, fontWeight: '500' },
+  historyLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.text3,
+    letterSpacing: 0.5,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 2,
+  },
+  searchHint: {
+    fontSize: 13,
+    color: colors.text3,
+    paddingHorizontal: 18,
+    paddingTop: 6,
+    paddingBottom: 14,
+  },
 
   // ─── Filter chips (bigger) ───
   chipsRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginBottom: 16 },

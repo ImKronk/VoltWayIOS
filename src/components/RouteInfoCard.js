@@ -60,7 +60,7 @@ function StopCard({ analysis }) {
   );
 }
 
-export default function RouteInfoCard({ route, onClear }) {
+export default function RouteInfoCard({ route, onClear, onStart }) {
   const insets = useSafeAreaInsets();
   if (!route) return null;
   return (
@@ -75,6 +75,9 @@ export default function RouteInfoCard({ route, onClear }) {
         </TouchableOpacity>
       </View>
       <StopCard analysis={route.analysis} />
+      <TouchableOpacity style={s.startBtn} onPress={onStart} activeOpacity={0.9}>
+        <Text style={s.startTxt}>Iniciar viagem  →</Text>
+      </TouchableOpacity>
     </View>
   );
 }
@@ -99,6 +102,15 @@ const s = StyleSheet.create({
     borderRadius: radius.sm,
   },
   clearTxt: { color: colors.c2, fontWeight: '700', fontSize: 12 },
+
+  startBtn: {
+    marginTop: 10,
+    backgroundColor: colors.c2,
+    borderRadius: radius.md,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
+  startTxt: { color: '#fff', fontWeight: '800', fontSize: 15 },
 
   stopWrap: { marginTop: 8, borderRadius: 10, overflow: 'hidden', borderWidth: 1.5 },
   stopHead: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 10, paddingVertical: 7 },

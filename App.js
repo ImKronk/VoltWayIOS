@@ -10,6 +10,7 @@ import { AppProvider } from './src/state/AppContext';
 import MapScreen from './src/screens/MapScreen';
 import StationDetailScreen from './src/screens/StationDetailScreen';
 import RouteScreen from './src/screens/RouteScreen';
+import NavigationScreen from './src/screens/NavigationScreen';
 import LeaderboardScreen from './src/screens/LeaderboardScreen';
 import PredictionScreen from './src/screens/PredictionScreen';
 import BatteryScreen from './src/screens/BatteryScreen';
@@ -28,6 +29,7 @@ export default function App() {
               <Stack.Screen name="Map" component={MapScreen} />
               <Stack.Screen name="StationDetail" component={StationDetailScreen} />
               <Stack.Screen name="Route" component={RouteScreen} />
+              <Stack.Screen name="Navigation" component={NavigationScreen} />
               <Stack.Screen name="Leaderboard" component={LeaderboardScreen} />
               <Stack.Screen name="Prediction" component={PredictionScreen} />
               <Stack.Screen name="Battery" component={BatteryScreen} />
