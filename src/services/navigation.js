@@ -5,29 +5,29 @@ function metres(a, b) {
   return haversineKm(a.latitude, a.longitude, b.latitude, b.longitude) * 1000;
 }
 
-// Maneuver arrow for an OpenRouteService step `type`.
-export function maneuverIcon(type) {
-  switch (type) {
-    case 0: // turn left
-    case 2: // sharp left
-    case 4: // slight left
-    case 12: // keep left
-      return '↰';
-    case 1: // turn right
-    case 3: // sharp right
-    case 5: // slight right
-    case 13: // keep right
-      return '↱';
-    case 7: // enter roundabout
-    case 8: // exit roundabout
-      return '↻';
-    case 9: // u-turn
-      return '↶';
-    case 10: // arrive
-      return '⚑';
-    default: // continue / depart
-      return '↑';
-  }
+// Linear interpolation between two coordinates (t in [0,1]).
+function lerp(a, b, t) {
+  return {
+    latitude: a.latitude + (b.latitude - a.latitude) * t,
+    longitude: a.longitude + (b.longitude - a.longitude) * t,
+  };
+}
+
+// Projects point P onto segment A→B using a local equirectangular plane
+// (metres). Returns { t, dist } — t is the clamped fraction along the
+// segment, dist is the perpendicular distance from P to the segment.
+function projectOnSegment(p, a, b) {
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos((a.latitude * Math.PI) / 180);
+  const bx = (b.longitude - a.longitude) * mPerDegLng;
+  const by = (b.latitude - a.latitude) * mPerDegLat;
+  const px = (p.longitude - a.longitude) * mPerDegLng;
+  const py = (p.latitude - a.latitude) * mPerDegLat;
+  const len2 = bx * bx + by * by;
+  let t = len2 > 0 ? (px * bx + py * by) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const dist = Math.hypot(px - bx * t, py - by * t);
+  return { t, dist };
 }
 
 // Live progress given the user's current position.
@@ -46,31 +46,42 @@ export function computeProgress(route, userPos) {
     };
   }
 
-  // Nearest route coordinate to the user.
-  let idx = 0;
+  // Snap the user onto the nearest route *segment* (not just the nearest
+  // vertex) so progress stays accurate on long, sparsely-sampled stretches.
+  // `seg` is the segment index i (i.e. the user sits between vertex i and
+  // i+1) and `frac` is how far along that segment they are.
+  let seg = 0;
+  let frac = 0;
   let nearD = Infinity;
-  for (let i = 0; i < coords.length; i += 1) {
-    const d = metres(coords[i], userPos);
-    if (d < nearD) {
-      nearD = d;
-      idx = i;
+  for (let i = 0; i < coords.length - 1; i += 1) {
+    const { t, dist } = projectOnSegment(userPos, coords[i], coords[i + 1]);
+    if (dist < nearD) {
+      nearD = dist;
+      seg = i;
+      frac = t;
     }
   }
 
-  // Distance from the user to the end of the route.
-  let remainingDistance = metres(userPos, coords[idx]);
-  for (let i = idx; i < coords.length - 1; i += 1) {
+  // Exact point on the route under the user, and the next vertex ahead.
+  const snapped = lerp(coords[seg], coords[seg + 1], frac);
+  const nextVertex = seg + 1;
+
+  // Distance from the snapped point to the end of the route.
+  let remainingDistance = metres(snapped, coords[nextVertex]);
+  for (let i = nextVertex; i < coords.length - 1; i += 1) {
     remainingDistance += metres(coords[i], coords[i + 1]);
   }
 
   const totalM = route.distanceM || remainingDistance || 1;
   const remainingDuration = (route.durationSec || 0) * Math.min(1, remainingDistance / totalM);
 
-  // Next maneuver = first step whose way-point lies ahead of the user.
+  // Next maneuver = first step whose maneuver vertex lies ahead of the user.
+  // We've passed every vertex <= seg, so a maneuver at vertex w is upcoming
+  // when w > seg.
   const steps = route.steps || [];
   let nextStep = null;
   for (const st of steps) {
-    if (st.wayPoint > idx) {
+    if (st.wayPoint > seg) {
       nextStep = st;
       break;
     }
@@ -79,9 +90,9 @@ export function computeProgress(route, userPos) {
   // Distance along the route until that maneuver.
   let distanceToNext = 0;
   if (nextStep) {
-    distanceToNext = metres(userPos, coords[idx]);
     const target = Math.min(nextStep.wayPoint, coords.length - 1);
-    for (let i = idx; i < target; i += 1) {
+    distanceToNext = metres(snapped, coords[nextVertex]);
+    for (let i = nextVertex; i < target; i += 1) {
       distanceToNext += metres(coords[i], coords[i + 1]);
     }
   }

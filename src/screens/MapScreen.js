@@ -38,7 +38,7 @@ export default function MapScreen({ navigation }) {
   const mapRef = useRef(null);
   const sheetRef = useRef(null);
   const searchDebounce = useRef(null);
-  const snapPoints = useMemo(() => ['18%', '56%', '92%'], []);
+  const snapPoints = useMemo(() => ['18%', '56%', '100%'], []);
   const insets = useSafeAreaInsets();
   const [search, setSearch] = useState('');
   const [suggestions, setSuggestions] = useState([]);
@@ -216,7 +216,9 @@ export default function MapScreen({ navigation }) {
           onSubmitEditing={doSearch}
           onFocus={() => {
             setSearchFocused(true);
-            sheetRef.current?.snapToIndex(2);
+            // Defer a frame so the snap isn't swallowed by the keyboard
+            // appearing; expand() goes to the top-most snap point (100%).
+            requestAnimationFrame(() => sheetRef.current?.expand());
           }}
           onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
         />
@@ -423,6 +425,10 @@ export default function MapScreen({ navigation }) {
         ref={sheetRef}
         index={1}
         snapPoints={snapPoints}
+        topInset={insets.top}
+        keyboardBehavior="extend"
+        keyboardBlurBehavior="restore"
+        android_keyboardInputMode="adjustResize"
         backgroundStyle={styles.sheetBg}
         handleIndicatorStyle={styles.sheetHandle}
       >

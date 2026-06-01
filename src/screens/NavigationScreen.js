@@ -11,24 +11,30 @@ import { colors, shadow } from '../theme/theme';
 import { haversineKm } from '../utils/geo';
 import {
   computeProgress,
-  maneuverIcon,
   fmtDistance,
   fmtDuration,
   fmtEta,
 } from '../services/navigation';
+import ManeuverArrow from '../components/ManeuverArrow';
+import CompassRose from '../components/CompassRose';
 
 export default function NavigationScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const { route } = useApp();
   const mapRef = useRef(null);
   const watchRef = useRef(null);
-  const headingRef = useRef(0);
+  const headingSubRef = useRef(null);
+  const headingRef = useRef(0); // smoothed compass heading (deg) driving rotation
+  const lastPosRef = useRef(null); // latest { latitude, longitude } for the camera
+  const camTickRef = useRef(0); // throttle for compass-driven camera animations
   const prevRef = useRef(null); // { lat, lng, t } — for derived speed
+  const speedRef = useRef(null); // last smoothed km/h
   const spokenRef = useRef(null);
   const arrivedRef = useRef(false);
 
   const [progress, setProgress] = useState(null);
   const [speed, setSpeed] = useState(0);
+  const [heading, setHeading] = useState(0); // for the compass indicator
 
   useEffect(() => {
     if (!route?.coords?.length) {
@@ -37,36 +43,58 @@ export default function NavigationScreen({ navigation }) {
     }
     let active = true;
 
+    // Drive the camera from a single source: centred on the car, rotated to
+    // the phone's compass heading, with speed-adaptive zoom + tilt. Called
+    // both on GPS fixes (position/zoom) and on compass ticks (rotation), so
+    // the map turns as you point the phone, not only when the car moves.
+    function updateCamera(duration) {
+      const center = lastPosRef.current;
+      if (!center || !mapRef.current) return;
+      const v = speedRef.current || 0; // km/h
+      // Zoom in tight at low speed (more turn detail), pull out at speed.
+      const altitude = Math.min(900, 300 + v * 5); // 0→300m, 60→600m, 120+→900m
+      // Flatten the tilt when stopped for an easier-to-read near top-down view.
+      const pitch = v < 1 ? 25 : Math.min(55, 30 + v * 2.5); // stopped→25°, ≥10→55°
+      mapRef.current.animateCamera(
+        { center, heading: headingRef.current, pitch, altitude },
+        { duration },
+      );
+    }
+
     // Handle one GPS sample: speed, progress, camera, voice.
     function handlePosition(pos) {
       if (!active || !pos?.coords) return;
       const userPos = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
-      if (pos.coords.heading != null && pos.coords.heading >= 0) {
-        headingRef.current = pos.coords.heading;
-      }
+      lastPosRef.current = userPos;
 
-      // Speed — the GPS value when available, otherwise derived from movement
-      // between samples so it is always counted.
+      // Speed — prefer the GPS Doppler value (accurate, reads 0 when stopped);
+      // only fall back to movement-between-samples when GPS speed is missing,
+      // and then ignore movement smaller than the fix's accuracy so GPS jitter
+      // doesn't show phantom km/h while parked.
       const now = { lat: userPos.latitude, lng: userPos.longitude, t: pos.timestamp || Date.now() };
-      let derivedKmh = 0;
-      if (prevRef.current && now.t > prevRef.current.t) {
+      const gps = pos.coords.speed; // m/s, or null/-1 when unknown
+      let kmh = 0;
+      if (gps != null && gps >= 0) {
+        kmh = gps * 3.6;
+      } else if (prevRef.current && now.t > prevRef.current.t) {
         const dm = haversineKm(prevRef.current.lat, prevRef.current.lng, now.lat, now.lng) * 1000;
         const dt = (now.t - prevRef.current.t) / 1000;
-        if (dt > 0) derivedKmh = (dm / dt) * 3.6;
+        const noise = Math.max(6, pos.coords.accuracy || 0);
+        if (dt > 0 && dm > noise) kmh = (dm / dt) * 3.6;
       }
       prevRef.current = now;
-      const gps = pos.coords.speed;
-      const kmh = gps != null && gps >= 0 ? gps * 3.6 : derivedKmh;
-      setSpeed(kmh < 3 ? 0 : Math.round(kmh));
+      // Light exponential smoothing to steady the readout between fixes.
+      const smoothed = speedRef.current == null ? kmh : speedRef.current * 0.4 + kmh * 0.6;
+      speedRef.current = smoothed;
+      setSpeed(smoothed < 3 ? 0 : Math.round(smoothed));
 
       const prog = computeProgress(route, userPos);
       setProgress(prog);
 
-      // Camera follows the car, rotated to the heading (course-up).
-      mapRef.current?.animateCamera(
-        { center: userPos, heading: headingRef.current, pitch: 55, zoom: 17 },
-        { duration: 1000 },
-      );
+      // Re-centre + re-zoom on each fix. Uses `altitude` (not `zoom`): on
+      // iOS/Apple Maps, repeatedly animating with `zoom` converts against the
+      // live mid-animation region and drifts into an infinite zoom-out.
+      updateCamera(900);
 
       // Voice: announce each maneuver once, as it gets close.
       if (
@@ -107,11 +135,44 @@ export default function NavigationScreen({ navigation }) {
       );
       if (active) watchRef.current = sub;
       else sub.remove();
+
+      // Compass: rotate the map toward where the phone points. The device
+      // heading (magnetometer) is smoothed circularly to kill jitter, then
+      // fed to the camera (throttled) and the on-screen compass indicator.
+      const headSub = await Location.watchHeadingAsync((h) => {
+        if (!active) return;
+        const deg = h.trueHeading != null && h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
+        if (deg == null || deg < 0) return;
+
+        // Circular smoothing (handles the 359°→0° wrap correctly).
+        const prev = headingRef.current;
+        const a = 0.2;
+        const ps = Math.sin((prev * Math.PI) / 180);
+        const pc = Math.cos((prev * Math.PI) / 180);
+        const ns = Math.sin((deg * Math.PI) / 180);
+        const nc = Math.cos((deg * Math.PI) / 180);
+        const smooth =
+          (Math.atan2(ps * (1 - a) + ns * a, pc * (1 - a) + nc * a) * 180) / Math.PI;
+        headingRef.current = (smooth + 360) % 360;
+
+        // Rotate the map, throttled, only on a meaningful change.
+        const t = Date.now();
+        let diff = Math.abs(headingRef.current - prev);
+        if (diff > 180) diff = 360 - diff;
+        if (diff >= 1.5 && t - camTickRef.current > 90) {
+          camTickRef.current = t;
+          updateCamera(150);
+        }
+        setHeading(Math.round(headingRef.current));
+      });
+      if (active) headingSubRef.current = headSub;
+      else headSub.remove();
     })();
 
     return () => {
       active = false;
       watchRef.current?.remove?.();
+      headingSubRef.current?.remove?.();
       Speech.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -171,7 +232,9 @@ export default function NavigationScreen({ navigation }) {
           <Text style={s.bannerArrived}>🏁  Chegaste ao destino</Text>
         ) : (
           <View style={s.bannerRow}>
-            <Text style={s.maneuver}>{next ? maneuverIcon(next.type) : '↑'}</Text>
+            <View style={s.maneuver}>
+              <ManeuverArrow type={next ? next.type : 6} size={48} color="#fff" />
+            </View>
             <View style={{ flex: 1 }}>
               <Text style={s.bannerDist}>
                 {fmtDistance(next ? progress.distanceToNext : progress.remainingDistance)}
@@ -184,6 +247,11 @@ export default function NavigationScreen({ navigation }) {
             </View>
           </View>
         )}
+      </View>
+
+      {/* North compass — rotates so the arrow always points to true north */}
+      <View style={[s.compass, { top: insets.top + 112 }]}>
+        <CompassRose heading={heading} size={28} color={colors.navy} />
       </View>
 
       {/* Speedometer */}
@@ -237,10 +305,22 @@ const s = StyleSheet.create({
     borderBottomRightRadius: 22,
   },
   bannerRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  maneuver: { fontSize: 50, color: '#fff', fontWeight: '300', width: 58, textAlign: 'center' },
+  maneuver: { width: 58, height: 58, alignItems: 'center', justifyContent: 'center' },
   bannerDist: { fontSize: 30, fontWeight: '800', color: '#fff' },
   bannerStreet: { fontSize: 15, color: '#9FC4CC', fontWeight: '600', marginTop: 3, lineHeight: 20 },
   bannerArrived: { fontSize: 19, fontWeight: '800', color: '#fff', textAlign: 'center' },
+
+  compass: {
+    position: 'absolute',
+    left: 16,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: colors.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadow.lg,
+  },
 
   speedPill: {
     position: 'absolute',
