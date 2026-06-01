@@ -7,6 +7,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 
 import { AppProvider } from './src/state/AppContext';
+import CarPlayBridge from './src/components/CarPlayBridge';
 import MapScreen from './src/screens/MapScreen';
 import StationDetailScreen from './src/screens/StationDetailScreen';
 import RouteScreen from './src/screens/RouteScreen';
@@ -15,6 +16,7 @@ import LeaderboardScreen from './src/screens/LeaderboardScreen';
 import PredictionScreen from './src/screens/PredictionScreen';
 import BatteryScreen from './src/screens/BatteryScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
+import PremiumScreen from './src/screens/PremiumScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -23,6 +25,7 @@ export default function App() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <AppProvider>
+          <CarPlayBridge />
           <NavigationContainer>
             <StatusBar style="dark" />
             <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -34,6 +37,7 @@ export default function App() {
               <Stack.Screen name="Prediction" component={PredictionScreen} />
               <Stack.Screen name="Battery" component={BatteryScreen} />
               <Stack.Screen name="Profile" component={ProfileScreen} />
+              <Stack.Screen name="Premium" component={PremiumScreen} />
             </Stack.Navigator>
           </NavigationContainer>
         </AppProvider>

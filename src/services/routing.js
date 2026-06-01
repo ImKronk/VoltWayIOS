@@ -120,45 +120,45 @@ export function findOptimalStop(destination, opts) {
   };
 }
 
-// Calls OpenRouteService and returns map-ready polyline coords + summary +
-// turn-by-turn steps. `waypoints` is an array of [lng, lat] pairs.
-export async function fetchRoute(waypoints, orsKey) {
-  const res = await fetch('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
-    method: 'POST',
-    headers: {
-      Authorization: orsKey,
-      'Content-Type': 'application/json',
-      Accept: 'application/geo+json',
-    },
-    body: JSON.stringify({ coordinates: waypoints, language: 'pt', instructions: true }),
-  });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error('ORS HTTP ' + res.status + ' — ' + t.slice(0, 90));
-  }
-  const data = await res.json();
-  const feature = data.features && data.features[0];
-  if (!feature) throw new Error('Sem rota devolvida');
-
+// Maps one ORS GeoJSON feature into a map-ready route option: polyline
+// coords, summary text, turn-by-turn steps, main road name, and toll info.
+function mapFeatureToRoute(feature) {
   const coords = feature.geometry.coordinates.map((c) => ({ latitude: c[1], longitude: c[0] }));
-  const summary = feature.properties.summary;
-  const distKm = summary.distance / 1000;
+  const summary = feature.properties.summary || {};
+  const distM = summary.distance || 0;
+  const distKm = distM / 1000;
   const distanceText = distKm < 10 ? distKm.toFixed(1) + ' km' : Math.round(distKm) + ' km';
-  const totalMin = Math.round(summary.duration / 60);
+  const totalMin = Math.round((summary.duration || 0) / 60);
   const durationText =
     totalMin >= 60 ? `${Math.floor(totalMin / 60)}h ${totalMin % 60}min` : `${totalMin} min`;
 
-  // Flatten turn-by-turn steps from every segment (way_points index `coords`).
+  // Flatten turn-by-turn steps; also pick the main road (longest named step).
   const steps = [];
+  let roadName = '';
+  let roadDist = 0;
   for (const seg of feature.properties.segments || []) {
     for (const st of seg.steps || []) {
+      const name = st.name && st.name !== '-' ? st.name : '';
       steps.push({
         instruction: st.instruction,
-        name: st.name && st.name !== '-' ? st.name : '',
+        name,
         distance: st.distance,
         type: st.type,
         wayPoint: st.way_points ? st.way_points[0] : 0,
       });
+      if (name && st.distance > roadDist) {
+        roadDist = st.distance;
+        roadName = name;
+      }
+    }
+  }
+
+  // Toll distance from the `tollways` extra (value 1 = tollway segment).
+  let tollDistanceM = 0;
+  const tw = feature.properties.extras && feature.properties.extras.tollways;
+  if (tw && Array.isArray(tw.summary)) {
+    for (const row of tw.summary) {
+      if (row.value === 1) tollDistanceM += row.distance || 0;
     }
   }
 
@@ -167,16 +167,60 @@ export async function fetchRoute(waypoints, orsKey) {
     distanceText,
     durationText,
     distanceKm: distKm,
-    distanceM: summary.distance,
-    durationSec: summary.duration,
+    distanceM: distM,
+    durationSec: summary.duration || 0,
     steps,
+    roadName,
+    hasTolls: tollDistanceM > 5,
+    tollDistanceM,
+    tollPrice: null, // filled later by the tolls service when a key is set
   };
 }
 
+// Calls OpenRouteService and returns one or more route options. `waypoints`
+// is an array of [lng, lat] pairs. opts:
+//   avoid        — ['tollways' | 'highways' | 'ferries'] (Evitar)
+//   alternatives — request up to 3 alternative routes (2-point routes only)
+export async function fetchRoutes(waypoints, orsKey, opts = {}) {
+  const { avoid = [], alternatives = false } = opts;
+  const body = {
+    coordinates: waypoints,
+    language: 'pt',
+    instructions: true,
+    extra_info: ['tollways'],
+  };
+  if (avoid.length) body.options = { avoid_features: avoid };
+  // ORS only allows alternative_routes for exactly two coordinates.
+  if (alternatives && waypoints.length === 2) {
+    body.alternative_routes = { target_count: 3, weight_factor: 1.6, share_factor: 0.6 };
+  }
+
+  const res = await fetch('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
+    method: 'POST',
+    headers: {
+      Authorization: orsKey,
+      'Content-Type': 'application/json',
+      Accept: 'application/geo+json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error('ORS HTTP ' + res.status + ' — ' + t.slice(0, 90));
+  }
+  const data = await res.json();
+  const feats = data.features || [];
+  if (!feats.length) throw new Error('Sem rota devolvida');
+  return feats.map(mapFeatureToRoute);
+}
+
 // One-shot helper used by both the map search and the route screen.
-// Returns { ok:true, route } or { ok:false, error }.
+// Returns { ok:true, route, routeOptions } or { ok:false, error }.
+//   route        — the selected (first) option
+//   routeOptions — all options (alternatives), each a full route object
+// opts.avoid is the Evitar selection (['tollways','highways','ferries']).
 export async function planRoute(destination, opts) {
-  const { stations, origin, batteryPrefs, userConnector, orsKey } = opts;
+  const { stations, origin, batteryPrefs, userConnector, orsKey, avoid = [] } = opts;
 
   if (!orsKey) {
     return { ok: false, error: 'Chave OpenRouteService nao configurada.' };
@@ -209,8 +253,16 @@ export async function planRoute(destination, opts) {
   }
 
   try {
-    const r = await fetchRoute(waypoints, orsKey);
-    return { ok: true, route: { destination, analysis, stopStation, ...r } };
+    // Alternatives only when there is no inserted charging stop (ORS limits
+    // alternative_routes to 2-point requests).
+    const options = await fetchRoutes(waypoints, orsKey, {
+      avoid,
+      alternatives: !analysis.needsStop,
+    });
+    // Attach the shared EV context to every option so any selected option is
+    // a complete `route` (destination/analysis/stopStation + geometry/steps).
+    const routeOptions = options.map((o) => ({ destination, analysis, stopStation, ...o }));
+    return { ok: true, route: routeOptions[0], routeOptions };
   } catch (e) {
     return { ok: false, error: 'Nao foi possivel calcular a rota: ' + e.message };
   }

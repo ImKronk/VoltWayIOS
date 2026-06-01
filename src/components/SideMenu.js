@@ -23,7 +23,7 @@ const MENU = [
   { icon: '👤', label: 'Perfil & Veículo', screen: 'Profile' },
   { icon: '🔋', label: 'Bateria & Autonomia', screen: 'Battery' },
   { icon: '🏆', label: 'Leaderboard', screen: 'Leaderboard' },
-  { icon: '🔮', label: 'Predições AI', screen: 'Prediction' },
+  { icon: '👑', label: 'Plano Premium', screen: 'Premium' },
 ];
 
 export default function SideMenu({ visible, onClose, navigation, onEditVehicle }) {

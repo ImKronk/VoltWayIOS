@@ -9,13 +9,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApp } from '../state/AppContext';
 import { colors, radius, shadow } from '../theme/theme';
 import { fmtPrice, fmtSpeedShort } from '../utils/format';
-import { planRoute } from '../services/routing';
 
 export default function RouteScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const app = useApp();
   const {
-    location, stations, connector, keys, batteryPrefs, setBatteryPrefs, selectedStation, setRoute,
+    stations, batteryPrefs, setBatteryPrefs, selectedStation, connector, planAndSetRoute,
   } = app;
 
   const [batt, setBatt] = useState(batteryPrefs.currentBatt);
@@ -43,15 +42,14 @@ export default function RouteScreen({ navigation }) {
     setBatteryPrefs(prefs);
     setBusy(true);
     try {
-      const res = await planRoute(
+      const res = await planAndSetRoute(
         { lat: selectedStation.lat, lng: selectedStation.lng, name: selectedStation.name },
-        { stations, origin: location, batteryPrefs: prefs, userConnector: connector, orsKey: keys.ors },
+        prefs,
       );
       if (!res.ok) {
         Alert.alert('Rota', res.error);
         return;
       }
-      setRoute(res.route);
       navigation.navigate('Map');
     } catch (e) {
       Alert.alert('Erro', e.message || 'Falha ao calcular a rota.');

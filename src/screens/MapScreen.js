@@ -6,6 +6,7 @@ import MapView, { Marker, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetFlatList, BottomSheetTextInput } from '@gorhom/bottom-sheet';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useIsFocused } from '@react-navigation/native';
 
 import { useApp } from '../state/AppContext';
 import { colors, radius, shadow, statusColor } from '../theme/theme';
@@ -13,10 +14,10 @@ import { fmtPrice, fmtSpeedShort } from '../utils/format';
 import { stationSupportsConnector } from '../utils/connectors';
 import { haversineKm } from '../utils/geo';
 import { freeInMinutes } from '../services/stationStatus';
-import { planRoute } from '../services/routing';
 import { autocompleteAddress } from '../services/geocode';
 import { loadRecentSearches, addRecentSearch } from '../services/recentSearches';
-import RouteInfoCard from '../components/RouteInfoCard';
+import RoutePreviewCard from '../components/RoutePreviewCard';
+import RouteTopBar from '../components/RouteTopBar';
 import SideMenu from '../components/SideMenu';
 import VehicleEditSheet from '../components/VehicleEditSheet';
 import ReportSheet from '../components/ReportSheet';
@@ -51,11 +52,37 @@ export default function MapScreen({ navigation }) {
   // Report flow: reportMode = picking a station; reportStation = the picked one.
   const [reportMode, setReportMode] = useState(false);
   const [reportStation, setReportStation] = useState(null);
+  // Bumped to cancel the route card's auto-start when the user interacts.
+  const [autoPauseSignal, setAutoPauseSignal] = useState(0);
+  // Bumped each time the map regains focus (e.g. returning from navigation)
+  // so the preview card resets to a plain, non-auto-starting state.
+  const isFocused = useIsFocused();
+  const wasFocused = useRef(true);
+  const [focusEpoch, setFocusEpoch] = useState(0);
+  useEffect(() => {
+    if (isFocused && !wasFocused.current) setFocusEpoch((n) => n + 1);
+    wasFocused.current = isFocused;
+  }, [isFocused]);
 
   const {
-    location, stations, route, connector, batteryPrefs, keys, loading,
-    setRoute, clearRoute, refreshStationsNear,
+    location, stations, route, connector, keys, loading,
+    clearRoute, refreshStationsNear,
+    routeOptions, selectRouteOption, avoid, setAvoid, planAndSetRoute,
   } = app;
+
+  // Remount the map when a route is cancelled. react-native-maps on iOS keeps
+  // Polyline overlays drawn even after they unmount, so the cleared route can
+  // linger on screen; re-keying the MapView forces a clean reset to the user's
+  // area. Only fires on the route→no-route transition (not when setting one).
+  const prevRouteRef = useRef(route);
+  const [mapResetKey, setMapResetKey] = useState(0);
+  useEffect(() => {
+    if (prevRouteRef.current && !route) setMapResetKey((k) => k + 1);
+    prevRouteRef.current = route;
+  }, [route]);
+
+  // Index of the currently selected route option (for highlighting).
+  const selIndex = Math.max(0, routeOptions.indexOf(route));
 
   // When a route is active, only connector-compatible stations are shown.
   const visible = useMemo(() => {
@@ -92,6 +119,17 @@ export default function MapScreen({ navigation }) {
   useEffect(() => {
     loadRecentSearches().then(setRecentSearches);
   }, []);
+
+  // Entering route mode unmounts the search sheet. Drop the keyboard and
+  // reset the search focus first, otherwise the keyboard stays stuck on
+  // screen (the focused input was removed) and freezes the map underneath.
+  useEffect(() => {
+    if (route) {
+      Keyboard.dismiss();
+      setSearchFocused(false);
+      setSuggestions([]);
+    }
+  }, [route]);
 
   const recenter = useCallback(() => {
     mapRef.current?.animateToRegion(
@@ -131,26 +169,24 @@ export default function MapScreen({ navigation }) {
   async function routeTo(destination) {
     setBusy(true);
     try {
-      const res = await planRoute(destination, {
-        stations,
-        origin: location,
-        batteryPrefs,
-        userConnector: connector,
-        orsKey: keys.ors,
-      });
+      const res = await planAndSetRoute(destination);
       if (!res.ok) {
         Alert.alert('Rota', res.error);
         return;
       }
-      setRoute(res.route);
       addRecentSearch(recentSearches, destination).then(setRecentSearches);
       refreshStationsNear(destination.lat, destination.lng);
-      sheetRef.current?.snapToIndex(0);
     } catch (e) {
       Alert.alert('Erro', e.message || 'Falha ao calcular a rota.');
     } finally {
       setBusy(false);
     }
+  }
+
+  // Toggle one Evitar feature and recompute the route with the new set.
+  function toggleAvoid(key) {
+    const next = avoid.includes(key) ? avoid.filter((k) => k !== key) : [...avoid, key];
+    setAvoid(next);
   }
 
   // Live address autocomplete (OpenRouteService geocoding), debounced.
@@ -165,6 +201,13 @@ export default function MapScreen({ navigation }) {
       const results = await autocompleteAddress(text, keys.ors, location);
       setSuggestions(results);
     }, 300);
+  }
+
+  // Wipe the whole search query (and its suggestions) in one tap.
+  function clearSearch() {
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    setSearch('');
+    setSuggestions([]);
   }
 
   // The user picked an address suggestion -> route straight to it.
@@ -222,7 +265,13 @@ export default function MapScreen({ navigation }) {
           }}
           onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
         />
-        {busy ? <ActivityIndicator size="small" color={colors.c2} /> : null}
+        {busy ? (
+          <ActivityIndicator size="small" color={colors.c2} />
+        ) : search.length > 0 ? (
+          <TouchableOpacity onPress={clearSearch} hitSlop={10} style={styles.clearSearchBtn}>
+            <Text style={styles.clearSearchTxt}>✕</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {suggestions.length > 0 ? (
@@ -309,6 +358,7 @@ export default function MapScreen({ navigation }) {
   return (
     <View style={styles.container}>
       <MapView
+        key={mapResetKey}
         ref={mapRef}
         style={StyleSheet.absoluteFill}
         showsUserLocation
@@ -364,20 +414,73 @@ export default function MapScreen({ navigation }) {
           </Marker>
         )}
 
+        {/* Route alternatives — non-selected drawn underneath, tappable */}
+        {routeOptions.map((opt, i) =>
+          i === selIndex ? null : (
+            <Polyline
+              key={`alt-${i}`}
+              coordinates={opt.coords}
+              strokeColor="rgba(120,134,150,0.55)"
+              strokeWidth={5}
+              tappable
+              onPress={() => selectRouteOption(i)}
+              zIndex={1}
+            />
+          ),
+        )}
         {route?.coords?.length ? (
-          <Polyline coordinates={route.coords} strokeColor={colors.c2} strokeWidth={6} />
+          <Polyline
+            key={`sel-${selIndex}`}
+            coordinates={route.coords}
+            strokeColor={colors.c2}
+            strokeWidth={7}
+            zIndex={3}
+          />
         ) : null}
+
+        {/* Time bubbles, one per alternative (only when there's a choice) */}
+        {routeOptions.length > 1 &&
+          routeOptions.map((opt, i) => {
+            const mid = opt.coords[Math.floor(opt.coords.length / 2)];
+            if (!mid) return null;
+            const selected = i === selIndex;
+            return (
+              <Marker
+                key={`bubble-${i}`}
+                coordinate={mid}
+                onPress={() => selectRouteOption(i)}
+                anchor={{ x: 0.5, y: 0.5 }}
+                zIndex={selected ? 5 : 2}
+              >
+                <View style={[styles.bubble, selected ? styles.bubbleOn : styles.bubbleOff]}>
+                  <Text style={[styles.bubbleTxt, selected ? styles.bubbleTxtOn : styles.bubbleTxtOff]}>
+                    {opt.durationText}
+                  </Text>
+                </View>
+              </Marker>
+            );
+          })}
       </MapView>
 
-      <TouchableOpacity
-        style={[styles.hamburger, { top: insets.top + 8 }]}
-        onPress={() => setMenuOpen(true)}
-        activeOpacity={0.8}
-      >
-        <View style={styles.hbLine} />
-        <View style={styles.hbLine} />
-        <View style={styles.hbLine} />
-      </TouchableOpacity>
+      {!route ? (
+        <TouchableOpacity
+          style={[styles.hamburger, { top: insets.top + 8 }]}
+          onPress={() => setMenuOpen(true)}
+          activeOpacity={0.8}
+        >
+          <View style={styles.hbLine} />
+          <View style={styles.hbLine} />
+          <View style={styles.hbLine} />
+        </TouchableOpacity>
+      ) : (
+        <RouteTopBar
+          destName={route.destination?.name}
+          onBack={clearRoute}
+          avoid={avoid}
+          onToggleAvoid={toggleAvoid}
+          onInteract={() => setAutoPauseSignal((n) => n + 1)}
+        />
+      )}
 
       {reportMode && !reportStation ? (
         <View style={[styles.reportBanner, { top: insets.top + 8 }]}>
@@ -392,14 +495,6 @@ export default function MapScreen({ navigation }) {
         </View>
       ) : null}
 
-      {route ? (
-        <RouteInfoCard
-          route={route}
-          onClear={clearRoute}
-          onStart={() => navigation.navigate('Navigation')}
-        />
-      ) : null}
-
       {loading ? (
         <View style={styles.loadingPill}>
           <ActivityIndicator size="small" color={colors.c2} />
@@ -407,11 +502,13 @@ export default function MapScreen({ navigation }) {
         </View>
       ) : null}
 
-      <TouchableOpacity style={styles.locateFab} onPress={recenter} activeOpacity={0.8}>
-        <Text style={styles.locateTxt}>◎</Text>
-      </TouchableOpacity>
+      {!route ? (
+        <TouchableOpacity style={styles.locateFab} onPress={recenter} activeOpacity={0.8}>
+          <Text style={styles.locateTxt}>◎</Text>
+        </TouchableOpacity>
+      ) : null}
 
-      {!reportMode ? (
+      {!reportMode && !route ? (
         <TouchableOpacity
           style={styles.reportFab}
           onPress={enterReportMode}
@@ -421,61 +518,85 @@ export default function MapScreen({ navigation }) {
         </TouchableOpacity>
       ) : null}
 
-      <BottomSheet
-        ref={sheetRef}
-        index={1}
-        snapPoints={snapPoints}
-        topInset={insets.top}
-        keyboardBehavior="extend"
-        keyboardBlurBehavior="restore"
-        android_keyboardInputMode="adjustResize"
-        backgroundStyle={styles.sheetBg}
-        handleIndicatorStyle={styles.sheetHandle}
-      >
-        <BottomSheetFlatList
-          data={searchFocused ? [] : displayed}
-          keyExtractor={(s) => String(s.id)}
-          keyboardShouldPersistTaps="handled"
-          ListHeaderComponent={ListHeader}
-          ListFooterComponent={searchFocused || reportMode ? null : ListFooter}
-          contentContainerStyle={{ paddingBottom: 36 }}
-          ListEmptyComponent={
-            searchFocused ? null : (
-              <Text style={styles.empty}>
-                {reportMode
-                  ? `Nenhum posto num raio de ${REPORT_RADIUS_LABEL} de ti.`
-                  : 'Nenhum posto compatível com o teu conector nesta área.'}
-              </Text>
-            )
-          }
-          renderItem={({ item: s }) => {
-            const freeIn = s.status === 'occupied' ? freeInMinutes(s) : null;
-            return (
-              <TouchableOpacity
-                style={styles.stCard}
-                onPress={() => onStationPress(s)}
-                activeOpacity={0.7}
-              >
-                <View style={[styles.stIcon, { backgroundColor: statusColor(s.status) }]}>
-                  <Text style={styles.stIconTxt}>⚡</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.stName} numberOfLines={1}>{s.name}</Text>
-                  <Text style={styles.stMeta}>
-                    {s.dist || '—'}   ·   {fmtSpeedShort(s)}
-                  </Text>
-                  {freeIn != null ? (
-                    <Text style={styles.stFreeIn}>
-                      ⏳ {freeIn > 0 ? `Livre em ~${freeIn} min` : 'Livre em breve'}
-                    </Text>
-                  ) : null}
-                </View>
-                <Text style={styles.stPrice}>{fmtPrice(s)}</Text>
-              </TouchableOpacity>
-            );
+      {/* No active route → search + filters + station list. */}
+      {!route ? (
+        <BottomSheet
+          ref={sheetRef}
+          index={1}
+          snapPoints={snapPoints}
+          topInset={insets.top}
+          keyboardBehavior="extend"
+          keyboardBlurBehavior="restore"
+          android_keyboardInputMode="adjustResize"
+          backgroundStyle={styles.sheetBg}
+          handleIndicatorStyle={styles.sheetHandle}
+          onChange={(i) => {
+            // Collapsing the sheet below the top snap closes the search:
+            // drop the keyboard and exit the focused (search) state.
+            if (i < 2) {
+              Keyboard.dismiss();
+              setSearchFocused(false);
+            }
           }}
+        >
+          <BottomSheetFlatList
+            data={searchFocused ? [] : displayed}
+            keyExtractor={(s) => String(s.id)}
+            keyboardShouldPersistTaps="handled"
+            ListHeaderComponent={ListHeader}
+            ListFooterComponent={searchFocused || reportMode ? null : ListFooter}
+            contentContainerStyle={{ paddingBottom: 36 }}
+            ListEmptyComponent={
+              searchFocused ? null : (
+                <Text style={styles.empty}>
+                  {reportMode
+                    ? `Nenhum posto num raio de ${REPORT_RADIUS_LABEL} de ti.`
+                    : 'Nenhum posto compatível com o teu conector nesta área.'}
+                </Text>
+              )
+            }
+            renderItem={({ item: s }) => {
+              const freeIn = s.status === 'occupied' ? freeInMinutes(s) : null;
+              return (
+                <TouchableOpacity
+                  style={styles.stCard}
+                  onPress={() => onStationPress(s)}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.stIcon, { backgroundColor: statusColor(s.status) }]}>
+                    <Text style={styles.stIconTxt}>⚡</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.stName} numberOfLines={1}>{s.name}</Text>
+                    <Text style={styles.stMeta}>
+                      {s.dist || '—'}   ·   {fmtSpeedShort(s)}
+                    </Text>
+                    {freeIn != null ? (
+                      <Text style={styles.stFreeIn}>
+                        ⏳ {freeIn > 0 ? `Livre em ~${freeIn} min` : 'Livre em breve'}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <Text style={styles.stPrice}>{fmtPrice(s)}</Text>
+                </TouchableOpacity>
+              );
+            }}
+          />
+        </BottomSheet>
+      ) : null}
+
+      {/* Active route → Apple-Maps-style preview card with auto-start. */}
+      {route ? (
+        <RoutePreviewCard
+          route={route}
+          onStart={() => navigation.navigate('Navigation')}
+          onClear={clearRoute}
+          onPlan={() => navigation.navigate('Route')}
+          autoStartMs={5000}
+          pauseSignal={autoPauseSignal}
+          resetSignal={focusEpoch}
         />
-      </BottomSheet>
+      ) : null}
 
       <SideMenu
         visible={menuOpen}
@@ -525,6 +646,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   pinTxt: { fontSize: 18 },
+
+  // ─── Route alternative time bubbles ───
+  bubble: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: '#fff',
+    ...shadow.card,
+  },
+  bubbleOn: { backgroundColor: colors.c2 },
+  bubbleOff: { backgroundColor: '#fff' },
+  bubbleTxt: { fontSize: 13, fontWeight: '800' },
+  bubbleTxtOn: { color: '#fff' },
+  bubbleTxtOff: { color: colors.navy },
 
   loadingPill: {
     position: 'absolute',
@@ -622,6 +758,15 @@ const styles = StyleSheet.create({
   },
   searchIcon: { fontSize: 19 },
   searchInput: { flex: 1, fontSize: 17, color: colors.c1, padding: 0, fontWeight: '500' },
+  clearSearchBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.c3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clearSearchTxt: { color: '#fff', fontSize: 13, fontWeight: '800', lineHeight: 15 },
 
   suggestBox: {
     marginHorizontal: 16,

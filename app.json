@@ -23,7 +23,8 @@
         {
           "locationWhenInUsePermission": "A VoltWay usa a tua localizacao para mostrar postos de carregamento proximos e calcular rotas."
         }
-      ]
+      ],
+      "./plugins/withCarPlay.js"
     ]
   }
 }

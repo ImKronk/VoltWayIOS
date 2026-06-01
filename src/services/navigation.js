@@ -80,12 +80,20 @@ export function computeProgress(route, userPos) {
   // when w > seg.
   const steps = route.steps || [];
   let nextStep = null;
-  for (const st of steps) {
-    if (st.wayPoint > seg) {
-      nextStep = st;
+  let nextIdx = -1;
+  for (let i = 0; i < steps.length; i += 1) {
+    if (steps[i].wayPoint > seg) {
+      nextStep = steps[i];
+      nextIdx = i;
       break;
     }
   }
+
+  // The maneuver right after the next one (for the "e a seguir" preview), and
+  // the road the user is currently on (the step they're already traversing).
+  const followingStep = nextIdx >= 0 && nextIdx + 1 < steps.length ? steps[nextIdx + 1] : null;
+  const currentStep = nextIdx > 0 ? steps[nextIdx - 1] : steps[0] || null;
+  const currentName = currentStep?.name || '';
 
   // Distance along the route until that maneuver.
   let distanceToNext = 0;
@@ -102,6 +110,8 @@ export function computeProgress(route, userPos) {
     remainingDuration,
     distanceToNext,
     nextStep,
+    followingStep,
+    currentName,
     arrived: remainingDistance < 35,
     offRoute: nearD > 70,
   };

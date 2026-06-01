@@ -2,9 +2,11 @@
 // currentUser, activeConnectorFilter, ...) used in the web app.js.
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../config/supabase';
 import { fetchApiKeys } from '../services/appConfig';
 import { loadOCMStations, loadSupabaseStations } from '../services/stations';
+import { planRoute } from '../services/routing';
 import { loadReportsFor, mapReportRow } from '../services/reports';
 import { fallbackStations } from '../data/pricing';
 import { reconcileStatus } from '../services/stationStatus';
@@ -37,10 +39,26 @@ export function AppProvider({ children }) {
   const [stations, setStations] = useState(() => normalizeStations(fallbackStations));
   const [keys, setKeys] = useState({ ocm: '', ors: '' });
   const [user, setUser] = useState(null);
-  const [route, setRoute] = useState(null);
+  const [route, setRoute] = useState(null); // currently selected route option
+  const [routeOptions, setRouteOptions] = useState([]); // all alternatives
+  const [avoid, setAvoidState] = useState([]); // Evitar: ['tollways','highways','ferries']
+  const routeReqRef = useRef(null); // last route request, for recompute on avoid change
   const [selectedStation, setSelectedStation] = useState(null);
   const [batteryPrefs, setBatteryPrefs] = useState({ currentBatt: 65, minBatt: 15, maxDist: 150 });
   const [loading, setLoading] = useState(true);
+
+  // Premium subscription flag (persisted locally). Gates premium-only features
+  // such as automatic car-battery sync.
+  const [premium, setPremiumState] = useState(false);
+  useEffect(() => {
+    AsyncStorage.getItem('voltway:premium').then((v) => {
+      if (v === '1') setPremiumState(true);
+    });
+  }, []);
+  const setPremium = useCallback((val) => {
+    setPremiumState(!!val);
+    AsyncStorage.setItem('voltway:premium', val ? '1' : '0').catch(() => {});
+  }, []);
 
   // Connector chosen in the user's profile (null when logged out -> show all).
   const connector = user?.user_metadata?.connector || null;
@@ -114,6 +132,69 @@ export function AppProvider({ children }) {
     [keys.ocm],
   );
 
+  // Plan a route to a destination and store the selected option + alternatives.
+  // Remembers the request so the Evitar toggle can recompute it later.
+  const planAndSetRoute = useCallback(
+    async (destination, prefsOverride, originOverride) => {
+      const prefs = prefsOverride || batteryPrefs;
+      const origin = originOverride || location;
+      routeReqRef.current = { destination, origin, batteryPrefs: prefs };
+      const res = await planRoute(destination, {
+        stations,
+        origin,
+        batteryPrefs: prefs,
+        userConnector: connector,
+        orsKey: keys.ors,
+        avoid,
+      });
+      if (res.ok) {
+        setRoute(res.route);
+        setRouteOptions(res.routeOptions);
+      }
+      return res;
+    },
+    [stations, location, batteryPrefs, connector, keys.ors, avoid],
+  );
+
+  // Pick one of the alternative route options as the active route.
+  const selectRouteOption = useCallback((index) => {
+    setRouteOptions((opts) => {
+      if (opts[index]) setRoute(opts[index]);
+      return opts;
+    });
+  }, []);
+
+  // Update the Evitar selection and recompute the current route with it.
+  const setAvoid = useCallback(
+    async (next) => {
+      setAvoidState(next);
+      const req = routeReqRef.current;
+      if (!req) return { ok: true };
+      const res = await planRoute(req.destination, {
+        stations,
+        origin: req.origin,
+        batteryPrefs: req.batteryPrefs,
+        userConnector: connector,
+        orsKey: keys.ors,
+        avoid: next,
+      });
+      if (res.ok) {
+        setRoute(res.route);
+        setRouteOptions(res.routeOptions);
+      }
+      return res;
+    },
+    [stations, connector, keys.ors],
+  );
+
+  // Clear the active route and everything derived from it.
+  const clearRoute = useCallback(() => {
+    setRoute(null);
+    setRouteOptions([]);
+    setAvoidState([]);
+    routeReqRef.current = null;
+  }, []);
+
   // Records a community report and re-derives the station's status. An
   // "occupied" report schedules an auto-return to "available" after the
   // estimated charging time; a fresh "available" report wins immediately.
@@ -185,12 +266,19 @@ export function AppProvider({ children }) {
     connector,
     route,
     setRoute,
-    clearRoute: () => setRoute(null),
+    routeOptions,
+    selectRouteOption,
+    avoid,
+    setAvoid,
+    planAndSetRoute,
+    clearRoute,
     selectedStation,
     setSelectedStation,
     batteryPrefs,
     setBatteryPrefs,
     loading,
+    premium,
+    setPremium,
     refreshStationsNear,
     reportStation,
   };
