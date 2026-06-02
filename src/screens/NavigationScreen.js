@@ -26,6 +26,7 @@ import { computeProgress, fmtDistance, fmtDuration, fmtEta } from '../services/n
 import ManeuverArrow from '../components/ManeuverArrow';
 import ReportSheet from '../components/ReportSheet';
 import SearchOverlay from '../components/SearchOverlay';
+import DestinationPin from '../components/DestinationPin';
 
 const CYAN = '#34C8F0';
 
@@ -306,17 +307,19 @@ export default function NavigationScreen({ navigation }) {
       >
         <Polyline coordinates={route.coords} strokeColor={colors.c2} strokeWidth={8} />
         {route.stopStation && (
-          <Marker coordinate={{ latitude: route.stopStation.lat, longitude: route.stopStation.lng }}>
-            <View style={[s.pin, { backgroundColor: colors.yellow }]}>
-              <Text style={s.pinTxt}>⚡</Text>
-            </View>
+          <Marker
+            coordinate={{ latitude: route.stopStation.lat, longitude: route.stopStation.lng }}
+            anchor={{ x: 0.5, y: 0.5 }}
+          >
+            <DestinationPin size={44} color="#1A66CC" />
           </Marker>
         )}
         {route.destination && (
-          <Marker coordinate={{ latitude: route.destination.lat, longitude: route.destination.lng }}>
-            <View style={[s.pin, { backgroundColor: colors.red }]}>
-              <Text style={s.pinTxt}>🏁</Text>
-            </View>
+          <Marker
+            coordinate={{ latitude: route.destination.lat, longitude: route.destination.lng }}
+            anchor={{ x: 0.5, y: 0.5 }}
+          >
+            <DestinationPin size={44} />
           </Marker>
         )}
 

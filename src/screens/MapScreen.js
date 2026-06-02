@@ -1,9 +1,10 @@
 // Map screen — Apple Maps + station markers + draggable bottom sheet.
 // Ports #screen-map (map, bottom sheet, search, chips, station list).
 import React, { useRef, useMemo, useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Dimensions } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetFlatList } from '@gorhom/bottom-sheet';
+import Animated, { useSharedValue, useAnimatedStyle } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useIsFocused } from '@react-navigation/native';
 
@@ -19,8 +20,8 @@ import SideMenu from '../components/SideMenu';
 import VehicleEditSheet from '../components/VehicleEditSheet';
 import ReportSheet from '../components/ReportSheet';
 import SearchOverlay from '../components/SearchOverlay';
-import StationIcon from '../components/StationIcon';
 import DestinationPin from '../components/DestinationPin';
+import LocateIcon from '../components/LocateIcon';
 
 const CHIPS = [
   { key: 'all', label: 'Todos' },
@@ -29,9 +30,11 @@ const CHIPS = [
   { key: 'cheap', label: 'Barato' },
 ];
 
-// Anchor so the bolt icon's bottom tip (at ~97.7% of its height) lands on the
-// station's exact coordinate — same dynamic as the destination pin.
-const BOLT_ANCHOR = { x: 0.5, y: 0.977 };
+// Pins put their tip at the canvas centre, so anchor them centred.
+const PIN_ANCHOR = { x: 0.5, y: 0.5 };
+// Golden colour for normal charging stations (the charging stop is blue).
+const STATION_GOLD = '#F2A60C';
+const SCREEN_H = Dimensions.get('window').height;
 
 // Stations within this radius (km) of the user can be reported.
 const REPORT_RADIUS_KM = 0.8;
@@ -44,6 +47,13 @@ export default function MapScreen({ navigation }) {
   const sheetRef = useRef(null);
   const snapPoints = useMemo(() => ['18%', '56%', '100%'], []);
   const insets = useSafeAreaInsets();
+
+  // Live top-edge position of the bottom sheet, so the floating buttons can sit
+  // just above it and follow it as it slides up/down.
+  const sheetPosition = useSharedValue(SCREEN_H * 0.44);
+  const fabFollowStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: sheetPosition.value - 70 }],
+  }));
   const [searchOpen, setSearchOpen] = useState(false);
   const [chip, setChip] = useState('all');
   const [busy, setBusy] = useState(false);
@@ -251,9 +261,9 @@ export default function MapScreen({ navigation }) {
           longitudeDelta: 0.08,
         }}
       >
-        {/* Stations as lightning bolts. When a route is active they shrink so
-            the charging stop (rendered larger below) stands out. The charging
-            stop itself is skipped here to avoid drawing it twice. */}
+        {/* Stations as pins (golden). When a route is active they shrink so the
+            charging stop (blue, larger, below) stands out. The charging stop
+            itself is skipped here to avoid drawing it twice. */}
         {displayed
           .filter((s) => !(route?.stopStation && s.id === route.stopStation.id))
           .map((s) => (
@@ -261,22 +271,22 @@ export default function MapScreen({ navigation }) {
               key={String(s.id)}
               coordinate={{ latitude: s.lat, longitude: s.lng }}
               onPress={() => onStationPress(s)}
-              anchor={BOLT_ANCHOR}
+              anchor={PIN_ANCHOR}
             >
-              <StationIcon size={route ? 18 : 30} />
+              <DestinationPin size={route ? 18 : 32} color={STATION_GOLD} />
             </Marker>
           ))}
 
-        {/* Charging stop — kept large so it's the clear point to charge. */}
+        {/* Charging stop — blue, kept large so it's the clear point to charge. */}
         {route?.stopStation && (
           <Marker
             key={`stop-${routeVersion}`}
             coordinate={{ latitude: route.stopStation.lat, longitude: route.stopStation.lng }}
             onPress={() => navigation.navigate('StationDetail', { station: route.stopStation })}
-            anchor={BOLT_ANCHOR}
+            anchor={PIN_ANCHOR}
             zIndex={4}
           >
-            <StationIcon size={42} />
+            <DestinationPin size={42} color="#1A66CC" />
           </Marker>
         )}
 
@@ -390,20 +400,18 @@ export default function MapScreen({ navigation }) {
         </View>
       ) : null}
 
+      {/* Floating buttons — sit just above the bottom sheet and follow it. */}
       {!route ? (
-        <TouchableOpacity style={styles.locateFab} onPress={recenter} activeOpacity={0.8}>
-          <Text style={styles.locateTxt}>◎</Text>
-        </TouchableOpacity>
-      ) : null}
-
-      {!reportMode && !route ? (
-        <TouchableOpacity
-          style={styles.reportFab}
-          onPress={enterReportMode}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.reportTxt}>⚠️</Text>
-        </TouchableOpacity>
+        <Animated.View style={[styles.fabRow, fabFollowStyle]} pointerEvents="box-none">
+          <TouchableOpacity style={styles.locateFab} onPress={recenter} activeOpacity={0.8}>
+            <LocateIcon size={24} color={colors.c1} />
+          </TouchableOpacity>
+          {!reportMode ? (
+            <TouchableOpacity style={styles.reportFab} onPress={enterReportMode} activeOpacity={0.85}>
+              <Text style={styles.reportTxt}>⚠️</Text>
+            </TouchableOpacity>
+          ) : null}
+        </Animated.View>
       ) : null}
 
       {/* No active route → search + filters + station list. */}
@@ -413,6 +421,7 @@ export default function MapScreen({ navigation }) {
           index={1}
           snapPoints={snapPoints}
           topInset={insets.top}
+          animatedPosition={sheetPosition}
           backgroundStyle={styles.sheetBg}
           handleIndicatorStyle={styles.sheetHandle}
         >
@@ -576,11 +585,17 @@ const styles = StyleSheet.create({
   reportBannerTxt: { flex: 1, color: '#fff', fontSize: 14, fontWeight: '700' },
   reportBannerX: { color: 'rgba(255,255,255,0.85)', fontSize: 17, fontWeight: '700' },
 
-  // ─── Floating buttons (bigger) ───
-  locateFab: {
+  // ─── Floating buttons (follow the bottom sheet) ───
+  fabRow: {
     position: 'absolute',
     left: 16,
-    bottom: '20%',
+    right: 16,
+    top: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  locateFab: {
     width: 50,
     height: 50,
     borderRadius: 25,
@@ -589,21 +604,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     ...shadow.lg,
   },
-  locateTxt: { fontSize: 24, color: colors.c1 },
-
   reportFab: {
-    position: 'absolute',
-    right: 16,
-    bottom: '20%',
     width: 58,
     height: 58,
     borderRadius: 29,
-    backgroundColor: colors.yellow,
+    backgroundColor: colors.card,
     alignItems: 'center',
     justifyContent: 'center',
     ...shadow.lg,
   },
-  reportTxt: { fontSize: 27 },
+  reportTxt: { fontSize: 26 },
 
   hamburger: {
     position: 'absolute',

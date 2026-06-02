@@ -7,9 +7,28 @@ import Svg, { Path, Defs, LinearGradient, Stop } from 'react-native-svg';
 
 const BOLT = 'M40 5 L15 47 L27 47 L28 86 L44 40 L32 40 Z';
 
-function StationIcon({ size = 30 }) {
+function StationIcon({ size = 30, color }) {
   const w = size;
   const h = size * 1.55;
+
+  // Solid colour variant (e.g. the selected charging stop) — keeps the same
+  // shape/anchor, just a different fill with a subtle outline.
+  if (color) {
+    return (
+      <Svg width={w} height={h} viewBox="0 0 56 88">
+        <Path
+          d={BOLT}
+          fill={color}
+          stroke="rgba(0,0,0,0.3)"
+          strokeWidth="3"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      </Svg>
+    );
+  }
+
+  // Default golden bolt (all other stations) — unchanged.
   return (
     <Svg width={w} height={h} viewBox="0 0 56 88">
       <Defs>
