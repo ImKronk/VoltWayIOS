@@ -33,29 +33,33 @@ export default function RouteScreen({ navigation }) {
     )
     .slice(0, 3);
 
-  async function compute() {
-    if (!selectedStation) {
-      Alert.alert('Destino', 'Escolhe primeiro um posto no mapa para definir o destino.');
-      return;
-    }
+  // Confirm the route options: save the battery limits (the system uses the
+  // current battery + minimum limit to pick the most efficient charging stop),
+  // compute the best route if a destination is set, then close the window.
+  async function confirm() {
     const prefs = { currentBatt: batt, minBatt, maxDist };
     setBatteryPrefs(prefs);
-    setBusy(true);
-    try {
-      const res = await planAndSetRoute(
-        { lat: selectedStation.lat, lng: selectedStation.lng, name: selectedStation.name },
-        prefs,
-      );
-      if (!res.ok) {
-        Alert.alert('Rota', res.error);
+
+    if (selectedStation) {
+      setBusy(true);
+      try {
+        const res = await planAndSetRoute(
+          { lat: selectedStation.lat, lng: selectedStation.lng, name: selectedStation.name },
+          prefs,
+        );
+        if (!res.ok) {
+          Alert.alert('Rota', res.error);
+          return;
+        }
+      } catch (e) {
+        Alert.alert('Erro', e.message || 'Falha ao calcular a rota.');
         return;
+      } finally {
+        setBusy(false);
       }
-      navigation.navigate('Map');
-    } catch (e) {
-      Alert.alert('Erro', e.message || 'Falha ao calcular a rota.');
-    } finally {
-      setBusy(false);
     }
+
+    navigation.goBack();
   }
 
   return (
@@ -175,11 +179,11 @@ export default function RouteScreen({ navigation }) {
       </ScrollView>
 
       <View style={[s.ctaWrap, { paddingBottom: insets.bottom + 12 }]}>
-        <TouchableOpacity style={s.cta} onPress={compute} disabled={busy} activeOpacity={0.9}>
+        <TouchableOpacity style={s.cta} onPress={confirm} disabled={busy} activeOpacity={0.9}>
           {busy ? (
             <ActivityIndicator size="small" color="#fff" />
           ) : (
-            <Text style={s.ctaTxt}>Encontrar Melhor Rota  →</Text>
+            <Text style={s.ctaTxt}>Confirmar</Text>
           )}
         </TouchableOpacity>
       </View>

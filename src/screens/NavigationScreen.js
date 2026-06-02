@@ -11,10 +11,8 @@ import {
   TouchableOpacity,
   Pressable,
   ActivityIndicator,
-  Keyboard,
   Alert,
   ScrollView,
-  TextInput,
 } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
@@ -22,13 +20,12 @@ import * as Location from 'expo-location';
 import * as Speech from 'expo-speech';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApp } from '../state/AppContext';
-import { colors, shadow } from '../theme/theme';
+import { colors, shadow, statusColor } from '../theme/theme';
 import { haversineKm } from '../utils/geo';
 import { computeProgress, fmtDistance, fmtDuration, fmtEta } from '../services/navigation';
 import ManeuverArrow from '../components/ManeuverArrow';
 import ReportSheet from '../components/ReportSheet';
-import { autocompleteAddress } from '../services/geocode';
-import { loadRecentSearches, addRecentSearch } from '../services/recentSearches';
+import SearchOverlay from '../components/SearchOverlay';
 
 const CYAN = '#34C8F0';
 
@@ -38,6 +35,7 @@ const VOICE_OPTIONS = [
   { mode: 'none', label: 'Sem som', icon: '🔇' },
 ];
 const voiceIconFor = (m) => (VOICE_OPTIONS.find((v) => v.mode === m) || VOICE_OPTIONS[0]).icon;
+const fmtKm = (km) => (km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`);
 
 export default function NavigationScreen({ navigation }) {
   const insets = useSafeAreaInsets();
@@ -64,14 +62,15 @@ export default function NavigationScreen({ navigation }) {
   const [sheetIdx, setSheetIdx] = useState(0);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportSel, setReportSel] = useState(null);
+  const [reportMode, setReportMode] = useState(false); // tap-a-station-on-the-map mode
+  const [pickerOpen, setPickerOpen] = useState(false); // optional list picker
+  const [nearby, setNearby] = useState([]);
   const [recalc, setRecalc] = useState(false);
+  const reportModeRef = useRef(false);
+  reportModeRef.current = reportMode;
 
-  // Search overlay state.
+  // Full-screen search (reroute) — handled by the shared SearchOverlay.
   const [searchOpen, setSearchOpen] = useState(false);
-  const [q, setQ] = useState('');
-  const [sugg, setSugg] = useState([]);
-  const [recents, setRecents] = useState([]);
-  const searchDebounce = useRef(null);
 
   // Keep refs current for the long-lived GPS callback.
   routeRef.current = route;
@@ -86,10 +85,6 @@ export default function NavigationScreen({ navigation }) {
   }, [route]);
 
   useEffect(() => {
-    loadRecentSearches().then(setRecents);
-  }, []);
-
-  useEffect(() => {
     if (!route?.coords?.length) {
       navigation.goBack();
       return undefined;
@@ -97,6 +92,9 @@ export default function NavigationScreen({ navigation }) {
     let active = true;
 
     function updateCamera(duration) {
+      // Hold the camera still while the user is picking a station to report,
+      // so the map doesn't pan/rotate away from the pin they're aiming at.
+      if (reportModeRef.current) return;
       const center = lastPosRef.current;
       if (!center || !mapRef.current) return;
       const v = speedRef.current || 0; // km/h
@@ -232,46 +230,32 @@ export default function NavigationScreen({ navigation }) {
     return p ? { lat: p.latitude, lng: p.longitude } : location;
   }
 
-  function openReport() {
+  // Report flow step 1 — enter "pick a station" mode: nearby stations become
+  // tappable pins on the map, plus an optional list (the 📋 icon).
+  function enterReportMode() {
     const base = baseLatLng();
-    let best = null;
-    let bd = Infinity;
-    for (const s of stations) {
-      const d = haversineKm(base.lat, base.lng, s.lat, s.lng);
-      if (d < bd) {
-        bd = d;
-        best = s;
-      }
-    }
-    setReportSel(best);
+    const list = stations
+      .map((s) => ({ ...s, _d: haversineKm(base.lat, base.lng, s.lat, s.lng) }))
+      .sort((a, b) => a._d - b._d)
+      .slice(0, 12);
+    setNearby(list);
+    setReportMode(true);
+  }
+
+  // Step 2 — station picked (from the map or the list): open its report
+  // options. Submitting there persists the report to the whole community.
+  function chooseStation(st) {
+    setReportSel(st);
+    setReportMode(false);
+    setPickerOpen(false);
     setReportOpen(true);
   }
 
   // ─── Search overlay (full-screen) ───
-  function openSearch() {
-    setQ('');
-    setSugg([]);
-    setSearchOpen(true);
-  }
-  function onSearchChange(text) {
-    setQ(text);
-    if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    if (text.trim().length < 3) {
-      setSugg([]);
-      return;
-    }
-    searchDebounce.current = setTimeout(async () => {
-      const results = await autocompleteAddress(text, keys.ors, baseLatLng());
-      setSugg(results);
-    }, 300);
-  }
+  // Reroute from the live position when the user picks a destination in the
+  // shared SearchOverlay; planAndSetRoute keeps the most efficient charging stop.
   async function rerouteTo(dest) {
-    if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    Keyboard.dismiss();
-    setSearchOpen(false);
     setRecalc(true);
-    // Reroute from the live position; planAndSetRoute keeps the most efficient
-    // charging stop in the plan.
     const res = await planAndSetRoute(
       { lat: dest.lat, lng: dest.lng, name: dest.name },
       undefined,
@@ -280,23 +264,6 @@ export default function NavigationScreen({ navigation }) {
     setRecalc(false);
     if (!res.ok) {
       Alert.alert('Rota', res.error || 'Não foi possível recalcular a rota.');
-      return;
-    }
-    addRecentSearch(recents, { lat: dest.lat, lng: dest.lng, name: dest.name }).then(setRecents);
-  }
-  async function submitSearch() {
-    const text = q.trim();
-    if (text.length < 3) return;
-    if (sugg.length) {
-      rerouteTo(sugg[0]);
-      return;
-    }
-    try {
-      const r = await Location.geocodeAsync(text);
-      if (r && r.length) rerouteTo({ lat: r[0].latitude, lng: r[0].longitude, name: text });
-      else Alert.alert('Destino', 'Não foi possível encontrar esse local.');
-    } catch (e) {
-      Alert.alert('Erro', e.message || 'Falha na pesquisa.');
     }
   }
 
@@ -335,6 +302,20 @@ export default function NavigationScreen({ navigation }) {
             </View>
           </Marker>
         )}
+
+        {/* Report mode — nearby stations become tappable pins on the map */}
+        {reportMode &&
+          nearby.map((st) => (
+            <Marker
+              key={`rep-${st.id}`}
+              coordinate={{ latitude: st.lat, longitude: st.lng }}
+              onPress={() => chooseStation(st)}
+            >
+              <View style={[s.repPin, { backgroundColor: statusColor(st.status) }]}>
+                <Text style={s.repPinTxt}>⚡</Text>
+              </View>
+            </Marker>
+          ))}
       </MapView>
 
       {/* Top maneuver banner (black) + "e a seguir" preview */}
@@ -383,7 +364,7 @@ export default function NavigationScreen({ navigation }) {
             <Text style={s.speedUnit}>km/h</Text>
           </View>
 
-          {currentName ? (
+          {currentName && !reportMode ? (
             <View style={[s.streetPill, { bottom: insets.bottom + 130 }]} pointerEvents="none">
               <Text style={s.streetTxt} numberOfLines={1}>
                 {currentName}
@@ -391,14 +372,31 @@ export default function NavigationScreen({ navigation }) {
             </View>
           ) : null}
 
-          <TouchableOpacity
-            style={[s.reportBtn, { bottom: insets.bottom + 118 }]}
-            onPress={openReport}
-            activeOpacity={0.85}
-          >
-            <Text style={s.reportTxt}>⚠️</Text>
-          </TouchableOpacity>
+          {!reportMode ? (
+            <TouchableOpacity
+              style={[s.reportBtn, { bottom: insets.bottom + 118 }]}
+              onPress={enterReportMode}
+              activeOpacity={0.85}
+            >
+              <Text style={s.reportTxt}>⚠️</Text>
+            </TouchableOpacity>
+          ) : null}
         </>
+      ) : null}
+
+      {/* Report mode bar: tap a station on the map, or open the list (📋) */}
+      {reportMode ? (
+        <View style={[s.reportBar, { bottom: insets.bottom + 124 }]}>
+          <Text style={s.reportBarTxt} numberOfLines={1}>
+            Toca num posto no mapa
+          </Text>
+          <TouchableOpacity style={s.reportBarIcon} onPress={() => setPickerOpen(true)} activeOpacity={0.8}>
+            <Text style={s.reportBarIconTxt}>📋</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setReportMode(false)} hitSlop={10}>
+            <Text style={s.reportBarX}>✕</Text>
+          </TouchableOpacity>
+        </View>
       ) : null}
 
       {recalc ? (
@@ -419,7 +417,7 @@ export default function NavigationScreen({ navigation }) {
       >
         <BottomSheetView style={[s.sheetContent, { paddingBottom: insets.bottom + 16 }]}>
           <View style={s.etaRow}>
-            <TouchableOpacity style={s.circleBtn} onPress={openSearch} activeOpacity={0.8}>
+            <TouchableOpacity style={s.circleBtn} onPress={() => setSearchOpen(true)} activeOpacity={0.8}>
               <Text style={s.circleIcon}>🔍</Text>
             </TouchableOpacity>
             <View style={{ flex: 1, alignItems: 'center' }}>
@@ -466,66 +464,44 @@ export default function NavigationScreen({ navigation }) {
         </View>
       ) : null}
 
-      {/* Full-screen search (reroute) */}
-      {searchOpen ? (
-        <View style={[s.searchOverlay, { paddingTop: insets.top + 8 }]}>
-          <View style={s.searchHeader}>
-            <TouchableOpacity onPress={() => setSearchOpen(false)} hitSlop={12} style={s.searchBack}>
-              <Text style={s.searchBackTxt}>‹</Text>
-            </TouchableOpacity>
-            <View style={s.searchInputWrap}>
-              <Text style={s.searchIcon}>🔍</Text>
-              <TextInput
-                style={s.searchInput}
-                value={q}
-                onChangeText={onSearchChange}
-                placeholder="Para onde vais?"
-                placeholderTextColor={colors.text3}
-                autoFocus
-                returnKeyType="search"
-                onSubmitEditing={submitSearch}
-              />
-              {q.length > 0 ? (
-                <TouchableOpacity onPress={() => { setQ(''); setSugg([]); }} hitSlop={10}>
-                  <Text style={s.searchClear}>✕</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-          </View>
-          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 }}>
-            {sugg.length > 0
-              ? sugg.map((sg, i) => (
+      {/* Full-screen search (reroute) — shared with the map screen */}
+      <SearchOverlay
+        visible={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onSelect={rerouteTo}
+      />
+
+      {/* Report step 1 — pick which station to report */}
+      {pickerOpen ? (
+        <View style={StyleSheet.absoluteFill}>
+          <Pressable style={s.menuBackdrop} onPress={() => setPickerOpen(false)} />
+          <View style={[s.pickerCard, { paddingBottom: insets.bottom + 12 }]}>
+            <Text style={s.pickerTitle}>Qual posto queres reportar?</Text>
+            <ScrollView style={{ maxHeight: 340 }} keyboardShouldPersistTaps="handled">
+              {nearby.length ? (
+                nearby.map((st) => (
                   <TouchableOpacity
-                    key={`${sg.lat},${sg.lng},${i}`}
-                    style={s.resultRow}
-                    onPress={() => rerouteTo(sg)}
-                    activeOpacity={0.6}
+                    key={String(st.id)}
+                    style={s.pickRow}
+                    onPress={() => chooseStation(st)}
+                    activeOpacity={0.7}
                   >
-                    <Text style={s.resultIcon}>📍</Text>
-                    <Text style={s.resultTxt} numberOfLines={2}>{sg.name}</Text>
+                    <View style={[s.pickDot, { backgroundColor: statusColor(st.status) }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.pickName} numberOfLines={1}>{st.name || 'Posto'}</Text>
+                      <Text style={s.pickMeta}>
+                        {fmtKm(st._d)}
+                        {st.speed ? `  ·  ${st.speed} kW` : ''}
+                      </Text>
+                    </View>
+                    <Text style={s.pickChevron}>›</Text>
                   </TouchableOpacity>
                 ))
-              : (
-                <>
-                  <Text style={s.resultsLabel}>RECENTES</Text>
-                  {recents.length ? (
-                    recents.map((r, i) => (
-                      <TouchableOpacity
-                        key={`${r.lat},${r.lng},${i}`}
-                        style={s.resultRow}
-                        onPress={() => rerouteTo(r)}
-                        activeOpacity={0.6}
-                      >
-                        <Text style={s.resultIcon}>🕘</Text>
-                        <Text style={s.resultTxt} numberOfLines={1}>{r.name}</Text>
-                      </TouchableOpacity>
-                    ))
-                  ) : (
-                    <Text style={s.resultsEmpty}>As tuas pesquisas recentes aparecem aqui.</Text>
-                  )}
-                </>
+              ) : (
+                <Text style={s.pickEmpty}>Nenhum posto por perto.</Text>
               )}
-          </ScrollView>
+            </ScrollView>
+          </View>
         </View>
       ) : null}
 
@@ -547,6 +523,45 @@ const s = StyleSheet.create({
     justifyContent: 'center',
   },
   pinTxt: { fontSize: 16 },
+
+  repPin: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 3,
+    borderColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadow.lg,
+  },
+  repPinTxt: { fontSize: 18 },
+
+  // ─── Report mode bar ───
+  reportBar: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#0A0A0A',
+    paddingLeft: 18,
+    paddingRight: 14,
+    paddingVertical: 12,
+    borderRadius: 16,
+    ...shadow.lg,
+  },
+  reportBarTxt: { flex: 1, color: '#fff', fontSize: 15, fontWeight: '700' },
+  reportBarIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reportBarIconTxt: { fontSize: 18 },
+  reportBarX: { color: 'rgba(255,255,255,0.8)', fontSize: 18, fontWeight: '800' },
 
   // ─── Banner ───
   banner: {
@@ -701,43 +716,36 @@ const s = StyleSheet.create({
   voiceLabelOn: { color: colors.c2, fontWeight: '800' },
   voiceCheck: { fontSize: 16, fontWeight: '800', color: colors.c2 },
 
-  // ─── Search overlay ───
-  searchOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: '#fff', paddingHorizontal: 16 },
-  searchHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
-  searchBack: { width: 34, height: 40, alignItems: 'center', justifyContent: 'center' },
-  searchBackTxt: { fontSize: 30, color: colors.navy, fontWeight: '700', marginTop: -4 },
-  searchInputWrap: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: colors.bg,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+  // ─── Station picker (report step 1) ───
+  pickerCard: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 12,
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 10,
+    ...shadow.lg,
   },
-  searchIcon: { fontSize: 17 },
-  searchInput: { flex: 1, fontSize: 16, color: colors.navy, padding: 0, fontWeight: '500' },
-  searchClear: { fontSize: 15, color: colors.text3, fontWeight: '800' },
-  resultsLabel: {
-    fontSize: 12,
+  pickerTitle: {
+    fontSize: 15,
     fontWeight: '800',
-    color: colors.text3,
-    letterSpacing: 0.5,
-    paddingHorizontal: 6,
-    paddingTop: 8,
-    paddingBottom: 6,
+    color: colors.navy,
+    paddingHorizontal: 10,
+    paddingTop: 6,
+    paddingBottom: 10,
   },
-  resultsEmpty: { fontSize: 14, color: colors.text3, paddingHorizontal: 6, paddingTop: 6 },
-  resultRow: {
+  pickRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingHorizontal: 6,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.bg,
+    paddingHorizontal: 12,
+    paddingVertical: 13,
+    borderRadius: 14,
   },
-  resultIcon: { fontSize: 18 },
-  resultTxt: { flex: 1, fontSize: 15, color: colors.navy, fontWeight: '500' },
+  pickDot: { width: 12, height: 12, borderRadius: 6 },
+  pickName: { fontSize: 15, fontWeight: '700', color: colors.navy },
+  pickMeta: { fontSize: 12, color: colors.text2, marginTop: 2, fontWeight: '500' },
+  pickChevron: { fontSize: 20, color: colors.text3 },
+  pickEmpty: { fontSize: 14, color: colors.text3, textAlign: 'center', padding: 20 },
 });

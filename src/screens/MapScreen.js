@@ -1,10 +1,9 @@
 // Map screen — Apple Maps + station markers + draggable bottom sheet.
 // Ports #screen-map (map, bottom sheet, search, chips, station list).
 import React, { useRef, useMemo, useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Keyboard } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
-import BottomSheet, { BottomSheetFlatList, BottomSheetTextInput } from '@gorhom/bottom-sheet';
-import * as Location from 'expo-location';
+import BottomSheet, { BottomSheetFlatList } from '@gorhom/bottom-sheet';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useIsFocused } from '@react-navigation/native';
 
@@ -14,13 +13,12 @@ import { fmtPrice, fmtSpeedShort } from '../utils/format';
 import { stationSupportsConnector } from '../utils/connectors';
 import { haversineKm } from '../utils/geo';
 import { freeInMinutes } from '../services/stationStatus';
-import { autocompleteAddress } from '../services/geocode';
-import { loadRecentSearches, addRecentSearch } from '../services/recentSearches';
 import RoutePreviewCard from '../components/RoutePreviewCard';
 import RouteTopBar from '../components/RouteTopBar';
 import SideMenu from '../components/SideMenu';
 import VehicleEditSheet from '../components/VehicleEditSheet';
 import ReportSheet from '../components/ReportSheet';
+import SearchOverlay from '../components/SearchOverlay';
 
 const CHIPS = [
   { key: 'all', label: 'Todos' },
@@ -38,13 +36,9 @@ export default function MapScreen({ navigation }) {
   const app = useApp();
   const mapRef = useRef(null);
   const sheetRef = useRef(null);
-  const searchDebounce = useRef(null);
   const snapPoints = useMemo(() => ['18%', '56%', '100%'], []);
   const insets = useSafeAreaInsets();
-  const [search, setSearch] = useState('');
-  const [suggestions, setSuggestions] = useState([]);
-  const [recentSearches, setRecentSearches] = useState([]);
-  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [chip, setChip] = useState('all');
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -115,20 +109,9 @@ export default function MapScreen({ navigation }) {
     }
   }, [route]);
 
-  // Load the persisted search history once.
+  // Close the search overlay once a route is set (e.g. after picking a place).
   useEffect(() => {
-    loadRecentSearches().then(setRecentSearches);
-  }, []);
-
-  // Entering route mode unmounts the search sheet. Drop the keyboard and
-  // reset the search focus first, otherwise the keyboard stays stuck on
-  // screen (the focused input was removed) and freezes the map underneath.
-  useEffect(() => {
-    if (route) {
-      Keyboard.dismiss();
-      setSearchFocused(false);
-      setSuggestions([]);
-    }
+    if (route) setSearchOpen(false);
   }, [route]);
 
   const recenter = useCallback(() => {
@@ -174,7 +157,6 @@ export default function MapScreen({ navigation }) {
         Alert.alert('Rota', res.error);
         return;
       }
-      addRecentSearch(recentSearches, destination).then(setRecentSearches);
       refreshStationsNear(destination.lat, destination.lng);
     } catch (e) {
       Alert.alert('Erro', e.message || 'Falha ao calcular a rota.');
@@ -189,163 +171,47 @@ export default function MapScreen({ navigation }) {
     setAvoid(next);
   }
 
-  // Live address autocomplete (OpenRouteService geocoding), debounced.
-  function onSearchChange(text) {
-    setSearch(text);
-    if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    if (text.trim().length < 3) {
-      setSuggestions([]);
-      return;
-    }
-    searchDebounce.current = setTimeout(async () => {
-      const results = await autocompleteAddress(text, keys.ors, location);
-      setSuggestions(results);
-    }, 300);
-  }
-
-  // Wipe the whole search query (and its suggestions) in one tap.
-  function clearSearch() {
-    if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    setSearch('');
-    setSuggestions([]);
-  }
-
-  // The user picked an address suggestion -> route straight to it.
-  function pickSuggestion(sug) {
-    if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    setSearch(sug.name);
-    setSuggestions([]);
-    Keyboard.dismiss();
-    routeTo({ lat: sug.lat, lng: sug.lng, name: sug.name });
-  }
-
-  // Keyboard "search" key: use the top suggestion, else the device geocoder.
-  async function doSearch() {
-    const q = search.trim();
-    if (q.length < 3) {
-      Alert.alert('Pesquisa', 'Escreve um destino com pelo menos 3 letras.');
-      return;
-    }
-    if (suggestions.length) {
-      pickSuggestion(suggestions[0]);
-      return;
-    }
-    setBusy(true);
-    try {
-      const results = await Location.geocodeAsync(q);
-      if (!results || !results.length) {
-        Alert.alert('Destino', 'Não foi possível encontrar esse local.');
-        return;
-      }
-      await routeTo({ lat: results[0].latitude, lng: results[0].longitude, name: q });
-    } catch (e) {
-      Alert.alert('Erro', e.message || 'Falha na pesquisa.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
   const ListHeader = (
     <View>
-      <View style={styles.searchBar}>
+      {/* Tapping opens the same full-screen search used in navigation. */}
+      <TouchableOpacity
+        style={styles.searchBar}
+        onPress={() => setSearchOpen(true)}
+        activeOpacity={0.8}
+      >
         <Text style={styles.searchIcon}>🔍</Text>
-        <BottomSheetTextInput
-          value={search}
-          onChangeText={onSearchChange}
-          placeholder="Para onde vais?"
-          placeholderTextColor={colors.c3}
-          style={styles.searchInput}
-          returnKeyType="search"
-          onSubmitEditing={doSearch}
-          onFocus={() => {
-            setSearchFocused(true);
-            // Defer a frame so the snap isn't swallowed by the keyboard
-            // appearing; expand() goes to the top-most snap point (100%).
-            requestAnimationFrame(() => sheetRef.current?.expand());
-          }}
-          onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
-        />
-        {busy ? (
-          <ActivityIndicator size="small" color={colors.c2} />
-        ) : search.length > 0 ? (
-          <TouchableOpacity onPress={clearSearch} hitSlop={10} style={styles.clearSearchBtn}>
-            <Text style={styles.clearSearchTxt}>✕</Text>
-          </TouchableOpacity>
-        ) : null}
+        <Text style={styles.searchPlaceholder}>Para onde vais?</Text>
+      </TouchableOpacity>
+
+      <View style={styles.chipsRow}>
+        {CHIPS.map((c) => {
+          const active = chip === c.key;
+          return (
+            <TouchableOpacity
+              key={c.key}
+              style={[styles.chip, active && styles.chipActive]}
+              onPress={() => setChip(c.key)}
+            >
+              <Text style={[styles.chipText, active && styles.chipTextActive]}>{c.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
 
-      {suggestions.length > 0 ? (
-        <View style={styles.suggestBox}>
-          {suggestions.map((sug, i) => (
-            <TouchableOpacity
-              key={`${sug.lat},${sug.lng},${i}`}
-              style={[styles.suggestRow, i > 0 && styles.suggestRowBorder]}
-              onPress={() => pickSuggestion(sug)}
-              activeOpacity={0.6}
-            >
-              <Text style={styles.suggestIcon}>📍</Text>
-              <Text style={styles.suggestTxt} numberOfLines={2}>{sug.name}</Text>
-            </TouchableOpacity>
-          ))}
+      <TouchableOpacity style={styles.predBanner} onPress={() => navigation.navigate('Prediction')}>
+        <View style={styles.predIconBox}>
+          <Text style={styles.predIconTxt}>🔮</Text>
         </View>
-      ) : null}
+        <Text style={styles.predTxt} numberOfLines={1}>Posto livre em ~20 min</Text>
+        <Text style={styles.predPct}>75%</Text>
+        <Text style={styles.predArrow}>›</Text>
+      </TouchableOpacity>
 
-      {searchFocused && suggestions.length === 0 ? (
-        recentSearches.length > 0 ? (
-          <View style={styles.suggestBox}>
-            <Text style={styles.historyLabel}>RECENTES</Text>
-            {recentSearches.map((r, i) => (
-              <TouchableOpacity
-                key={`${r.lat},${r.lng},${i}`}
-                style={[styles.suggestRow, styles.suggestRowBorder]}
-                onPress={() => pickSuggestion(r)}
-                activeOpacity={0.6}
-              >
-                <Text style={styles.suggestIcon}>🕘</Text>
-                <Text style={styles.suggestTxt} numberOfLines={1}>{r.name}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        ) : (
-          <Text style={styles.searchHint}>
-            As tuas pesquisas recentes vão aparecer aqui.
-          </Text>
-        )
-      ) : null}
-
-      {!searchFocused ? (
-        <>
-          <View style={styles.chipsRow}>
-            {CHIPS.map((c) => {
-              const active = chip === c.key;
-              return (
-                <TouchableOpacity
-                  key={c.key}
-                  style={[styles.chip, active && styles.chipActive]}
-                  onPress={() => setChip(c.key)}
-                >
-                  <Text style={[styles.chipText, active && styles.chipTextActive]}>{c.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          <TouchableOpacity style={styles.predBanner} onPress={() => navigation.navigate('Prediction')}>
-            <View style={styles.predIconBox}>
-              <Text style={styles.predIconTxt}>🔮</Text>
-            </View>
-            <Text style={styles.predTxt} numberOfLines={1}>Posto livre em ~20 min</Text>
-            <Text style={styles.predPct}>75%</Text>
-            <Text style={styles.predArrow}>›</Text>
-          </TouchableOpacity>
-
-          <Text style={styles.sectionTitle}>
-            {reportMode
-              ? `ESCOLHE UM POSTO  ·  ${inRange.length}`
-              : `${route ? 'POSTOS COMPATÍVEIS' : 'POSTOS PERTO'}  ·  ${visible.length}`}
-          </Text>
-        </>
-      ) : null}
+      <Text style={styles.sectionTitle}>
+        {reportMode
+          ? `ESCOLHE UM POSTO  ·  ${inRange.length}`
+          : `${route ? 'POSTOS COMPATÍVEIS' : 'POSTOS PERTO'}  ·  ${visible.length}`}
+      </Text>
     </View>
   );
 
@@ -525,35 +391,22 @@ export default function MapScreen({ navigation }) {
           index={1}
           snapPoints={snapPoints}
           topInset={insets.top}
-          keyboardBehavior="extend"
-          keyboardBlurBehavior="restore"
-          android_keyboardInputMode="adjustResize"
           backgroundStyle={styles.sheetBg}
           handleIndicatorStyle={styles.sheetHandle}
-          onChange={(i) => {
-            // Collapsing the sheet below the top snap closes the search:
-            // drop the keyboard and exit the focused (search) state.
-            if (i < 2) {
-              Keyboard.dismiss();
-              setSearchFocused(false);
-            }
-          }}
         >
           <BottomSheetFlatList
-            data={searchFocused ? [] : displayed}
+            data={displayed}
             keyExtractor={(s) => String(s.id)}
             keyboardShouldPersistTaps="handled"
             ListHeaderComponent={ListHeader}
-            ListFooterComponent={searchFocused || reportMode ? null : ListFooter}
+            ListFooterComponent={reportMode ? null : ListFooter}
             contentContainerStyle={{ paddingBottom: 36 }}
             ListEmptyComponent={
-              searchFocused ? null : (
-                <Text style={styles.empty}>
-                  {reportMode
-                    ? `Nenhum posto num raio de ${REPORT_RADIUS_LABEL} de ti.`
-                    : 'Nenhum posto compatível com o teu conector nesta área.'}
-                </Text>
-              )
+              <Text style={styles.empty}>
+                {reportMode
+                  ? `Nenhum posto num raio de ${REPORT_RADIUS_LABEL} de ti.`
+                  : 'Nenhum posto compatível com o teu conector nesta área.'}
+              </Text>
             }
             renderItem={({ item: s }) => {
               const freeIn = s.status === 'occupied' ? freeInMinutes(s) : null;
@@ -592,7 +445,7 @@ export default function MapScreen({ navigation }) {
           onStart={() => navigation.navigate('Navigation')}
           onClear={clearRoute}
           onPlan={() => navigation.navigate('Route')}
-          autoStartMs={5000}
+          autoStartMs={10000}
           pauseSignal={autoPauseSignal}
           resetSignal={focusEpoch}
         />
@@ -609,6 +462,13 @@ export default function MapScreen({ navigation }) {
         visible={!!reportStation}
         station={reportStation}
         onClose={exitReport}
+      />
+
+      {/* Full-screen search — identical to the navigation screen's search. */}
+      <SearchOverlay
+        visible={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onSelect={routeTo}
       />
     </View>
   );
@@ -757,53 +617,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
   },
   searchIcon: { fontSize: 19 },
-  searchInput: { flex: 1, fontSize: 17, color: colors.c1, padding: 0, fontWeight: '500' },
-  clearSearchBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: colors.c3,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  clearSearchTxt: { color: '#fff', fontSize: 13, fontWeight: '800', lineHeight: 15 },
-
-  suggestBox: {
-    marginHorizontal: 16,
-    marginTop: -4,
-    marginBottom: 14,
-    backgroundColor: colors.card,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: colors.c3,
-    overflow: 'hidden',
-  },
-  suggestRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  suggestRowBorder: { borderTopWidth: 1, borderTopColor: colors.c4 },
-  suggestIcon: { fontSize: 16 },
-  suggestTxt: { flex: 1, fontSize: 14, color: colors.c1, fontWeight: '500' },
-  historyLabel: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: colors.text3,
-    letterSpacing: 0.5,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 2,
-  },
-  searchHint: {
-    fontSize: 13,
-    color: colors.text3,
-    paddingHorizontal: 18,
-    paddingTop: 6,
-    paddingBottom: 14,
-  },
+  searchPlaceholder: { flex: 1, fontSize: 17, color: colors.c3, fontWeight: '500' },
 
   // ─── Filter chips (bigger) ───
   chipsRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginBottom: 16 },

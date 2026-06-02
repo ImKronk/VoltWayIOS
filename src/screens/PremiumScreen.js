@@ -54,7 +54,7 @@ export default function PremiumScreen({ navigation }) {
           <Text style={s.heroSub}>
             {premium ? 'A tua subscrição está ativa.' : 'Desbloqueia tudo o que a VoltWay tem para oferecer.'}
           </Text>
-          {!premium ? <Text style={s.price}>4,99 € <Text style={s.priceMo}>/ mês</Text></Text> : null}
+          {!premium ? <Text style={s.price}>2,99 € <Text style={s.priceMo}>/ mês</Text></Text> : null}
           {premium ? (
             <View style={s.activeBadge}>
               <Text style={s.activeBadgeTxt}>✓ Premium ativo</Text>
