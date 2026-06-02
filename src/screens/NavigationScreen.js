@@ -27,6 +27,7 @@ import ManeuverArrow from '../components/ManeuverArrow';
 import ReportSheet from '../components/ReportSheet';
 import SearchOverlay from '../components/SearchOverlay';
 import DestinationPin from '../components/DestinationPin';
+import NavArrow from '../components/NavArrow';
 
 const CYAN = '#34C8F0';
 
@@ -58,6 +59,8 @@ export default function NavigationScreen({ navigation }) {
 
   const [progress, setProgress] = useState(null);
   const [speed, setSpeed] = useState(0);
+  const [userPos, setUserPos] = useState(null); // live position for the arrow
+  const [arrowTracks, setArrowTracks] = useState(true); // re-capture arrow until painted
   const [voiceMode, setVoiceMode] = useState('full'); // 'full' | 'alerts' | 'none'
   const [voiceMenu, setVoiceMenu] = useState(false);
   const [sheetIdx, setSheetIdx] = useState(0);
@@ -85,6 +88,12 @@ export default function NavigationScreen({ navigation }) {
     arrivedRef.current = false;
   }, [route]);
 
+  // Stop re-rendering the arrow bitmap once it's painted (no per-fix flicker).
+  useEffect(() => {
+    const t = setTimeout(() => setArrowTracks(false), 1500);
+    return () => clearTimeout(t);
+  }, []);
+
   useEffect(() => {
     if (!route?.coords?.length) {
       navigation.goBack();
@@ -99,7 +108,8 @@ export default function NavigationScreen({ navigation }) {
       const center = lastPosRef.current;
       if (!center || !mapRef.current) return;
       const v = speedRef.current || 0; // km/h
-      const altitude = Math.min(900, 300 + v * 5);
+      // Tighter zoom when moving slowly (more detail), wider at speed.
+      const altitude = Math.min(900, 190 + v * 6);
       const pitch = v < 1 ? 25 : Math.min(55, 30 + v * 2.5);
       mapRef.current.animateCamera(
         { center, heading: headingRef.current, pitch, altitude },
@@ -111,6 +121,7 @@ export default function NavigationScreen({ navigation }) {
       if (!active || !pos?.coords) return;
       const userPos = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
       lastPosRef.current = userPos;
+      setUserPos(userPos);
 
       // Speed — prefer GPS Doppler, fall back to movement between fixes while
       // ignoring sub-accuracy jitter, then lightly smooth.
@@ -274,6 +285,13 @@ export default function NavigationScreen({ navigation }) {
   const currentName = progress?.currentName;
   const showFloaters = sheetIdx <= 0; // hide when the end-trip sheet is expanded
 
+  // Split the route at the user's snapped position so the path "follows" them:
+  // the part already driven is dimmed, the part ahead keeps the accent colour.
+  const snappedPt = progress?.snapped;
+  const splitIdx = progress?.seg != null ? progress.seg : 0;
+  const traveledCoords = snappedPt ? [...route.coords.slice(0, splitIdx + 1), snappedPt] : [];
+  const remainingCoords = snappedPt ? [snappedPt, ...route.coords.slice(splitIdx + 1)] : route.coords;
+
   // If the planned charging stop is now reported occupied, offer an alternative
   // that takes the user's current position + remaining route into account.
   const liveStop = route.stopStation ? stations.find((s) => s.id === route.stopStation.id) : null;
@@ -296,7 +314,7 @@ export default function NavigationScreen({ navigation }) {
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFill}
-        showsUserLocation
+        showsUserLocation={false}
         showsMyLocationButton={false}
         initialRegion={{
           latitude: route.coords[0].latitude,
@@ -305,7 +323,23 @@ export default function NavigationScreen({ navigation }) {
           longitudeDelta: 0.006,
         }}
       >
-        <Polyline coordinates={route.coords} strokeColor={colors.c2} strokeWidth={8} />
+        {/* Already-driven part dimmed, the remaining path keeps the accent. */}
+        {traveledCoords.length > 1 ? (
+          <Polyline coordinates={traveledCoords} strokeColor="rgba(120,134,150,0.45)" strokeWidth={8} />
+        ) : null}
+        <Polyline coordinates={remainingCoords} strokeColor={colors.c2} strokeWidth={8} />
+
+        {/* Live position as a forward-pointing arrow (heading-up map). */}
+        {userPos ? (
+          <Marker
+            coordinate={userPos}
+            anchor={{ x: 0.5, y: 0.5 }}
+            zIndex={6}
+            tracksViewChanges={arrowTracks}
+          >
+            <NavArrow size={36} />
+          </Marker>
+        ) : null}
         {route.stopStation && (
           <Marker
             coordinate={{ latitude: route.stopStation.lat, longitude: route.stopStation.lng }}

@@ -112,6 +112,8 @@ export function computeProgress(route, userPos) {
     nextStep,
     followingStep,
     currentName,
+    seg, // index of the route segment the user is on
+    snapped, // the exact point on the route under the user
     arrived: remainingDistance < 35,
     offRoute: nearD > 70,
   };
