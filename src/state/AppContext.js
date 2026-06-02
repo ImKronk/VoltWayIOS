@@ -26,6 +26,31 @@ function normalizeStations(list) {
   }));
 }
 
+// Merges several freshly-loaded station lists into one set, de-duplicated by
+// id, carrying over any live community status/reports from `prev` so reloading
+// from OCM doesn't wipe crowd-sourced state. Used to combine chargers near the
+// origin AND near the destination when planning a route.
+function mergeStationLists(lists, prev) {
+  const prevById = new Map((prev || []).map((s) => [s.id, s]));
+  const byId = new Map();
+  for (const list of lists) {
+    if (!list) continue;
+    for (const raw of list) {
+      if (!raw || raw.id == null || byId.has(raw.id)) continue;
+      const p = prevById.get(raw.id);
+      const live = p && p.reports && p.reports.length;
+      byId.set(raw.id, {
+        ...raw,
+        baseStatus: (p && p.baseStatus) ?? raw.status,
+        reports: (p && p.reports) ?? [],
+        occupiedUntil: (p && p.occupiedUntil) ?? null,
+        status: live ? p.status : raw.status,
+      });
+    }
+  }
+  return [...byId.values()];
+}
+
 // Appends community reports to a station and re-derives its status.
 function applyReports(station, newReports) {
   const reports = [...(station.reports || []), ...newReports].slice(-20);
@@ -138,22 +163,45 @@ export function AppProvider({ children }) {
     async (destination, prefsOverride, originOverride) => {
       const prefs = prefsOverride || batteryPrefs;
       const origin = originOverride || location;
+
+      // Consider chargers across the WHOLE trip corridor: load OCM near the
+      // origin, the mid-point and the destination, then merge (keeping live
+      // community status). This is why the optimal stop can be a station near
+      // YOU or on the motorway mid-route, not only near the destination.
+      let routeStations = stations;
+      try {
+        const mid = { lat: (origin.lat + destination.lat) / 2, lng: (origin.lng + destination.lng) / 2 };
+        const [near, middle, far] = await Promise.all([
+          loadOCMStations(origin.lat, origin.lng, keys.ocm),
+          loadOCMStations(mid.lat, mid.lng, keys.ocm),
+          loadOCMStations(destination.lat, destination.lng, keys.ocm),
+        ]);
+        if (near || middle || far) {
+          const merged = mergeStationLists([near, middle, far], stations);
+          if (merged.length) routeStations = merged;
+        }
+      } catch (e) {
+        // keep the current stations
+      }
+
       routeReqRef.current = { destination, origin, batteryPrefs: prefs };
       const res = await planRoute(destination, {
-        stations,
+        stations: routeStations,
         origin,
         batteryPrefs: prefs,
         userConnector: connector,
         orsKey: keys.ors,
+        tomtomKey: keys.tomtom,
         avoid,
       });
       if (res.ok) {
         setRoute(res.route);
         setRouteOptions(res.routeOptions);
+        setStations(routeStations); // show the combined corridor set
       }
       return res;
     },
-    [stations, location, batteryPrefs, connector, keys.ors, avoid],
+    [stations, location, batteryPrefs, connector, keys.ors, keys.ocm, keys.tomtom, avoid],
   );
 
   // Pick one of the alternative route options as the active route.
@@ -176,6 +224,7 @@ export function AppProvider({ children }) {
         batteryPrefs: req.batteryPrefs,
         userConnector: connector,
         orsKey: keys.ors,
+        tomtomKey: keys.tomtom,
         avoid: next,
       });
       if (res.ok) {
@@ -184,7 +233,7 @@ export function AppProvider({ children }) {
       }
       return res;
     },
-    [stations, connector, keys.ors],
+    [stations, connector, keys.ors, keys.tomtom],
   );
 
   // Clear the active route and everything derived from it.

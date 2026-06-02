@@ -14,8 +14,15 @@ export default function RouteScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const app = useApp();
   const {
-    stations, batteryPrefs, setBatteryPrefs, selectedStation, connector, planAndSetRoute,
+    stations, batteryPrefs, setBatteryPrefs, selectedStation, connector, planAndSetRoute, route,
   } = app;
+
+  // The destination to (re)plan for: a station picked on the map, otherwise
+  // the active route's destination (e.g. an address searched earlier). This is
+  // what lets "Confirmar" reprogram a searched route when the battery changes.
+  const destination = selectedStation
+    ? { lat: selectedStation.lat, lng: selectedStation.lng, name: selectedStation.name }
+    : route?.destination || null;
 
   const [batt, setBatt] = useState(batteryPrefs.currentBatt);
   const [minBatt, setMinBatt] = useState(batteryPrefs.minBatt);
@@ -40,13 +47,10 @@ export default function RouteScreen({ navigation }) {
     const prefs = { currentBatt: batt, minBatt, maxDist };
     setBatteryPrefs(prefs);
 
-    if (selectedStation) {
+    if (destination) {
       setBusy(true);
       try {
-        const res = await planAndSetRoute(
-          { lat: selectedStation.lat, lng: selectedStation.lng, name: selectedStation.name },
-          prefs,
-        );
+        const res = await planAndSetRoute(destination, prefs);
         if (!res.ok) {
           Alert.alert('Rota', res.error);
           return;
@@ -79,7 +83,7 @@ export default function RouteScreen({ navigation }) {
           <View style={{ flex: 1 }}>
             <Text style={s.destLabel}>DESTINO</Text>
             <Text style={s.destName} numberOfLines={1}>
-              {selectedStation ? selectedStation.name : 'Nenhum posto escolhido'}
+              {destination ? destination.name : 'Nenhum destino escolhido'}
             </Text>
           </View>
         </View>

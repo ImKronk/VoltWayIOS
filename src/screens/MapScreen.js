@@ -19,6 +19,8 @@ import SideMenu from '../components/SideMenu';
 import VehicleEditSheet from '../components/VehicleEditSheet';
 import ReportSheet from '../components/ReportSheet';
 import SearchOverlay from '../components/SearchOverlay';
+import StationIcon from '../components/StationIcon';
+import DestinationPin from '../components/DestinationPin';
 
 const CHIPS = [
   { key: 'all', label: 'Todos' },
@@ -26,6 +28,10 @@ const CHIPS = [
   { key: 'fast', label: 'Rápido' },
   { key: 'cheap', label: 'Barato' },
 ];
+
+// Anchor so the bolt icon's bottom tip (at ~97.7% of its height) lands on the
+// station's exact coordinate — same dynamic as the destination pin.
+const BOLT_ANCHOR = { x: 0.5, y: 0.977 };
 
 // Stations within this radius (km) of the user can be reported.
 const REPORT_RADIUS_KM = 0.8;
@@ -60,7 +66,7 @@ export default function MapScreen({ navigation }) {
 
   const {
     location, stations, route, connector, keys, loading,
-    clearRoute, refreshStationsNear,
+    clearRoute,
     routeOptions, selectRouteOption, avoid, setAvoid, planAndSetRoute,
   } = app;
 
@@ -74,6 +80,14 @@ export default function MapScreen({ navigation }) {
     if (prevRouteRef.current && !route) setMapResetKey((k) => k + 1);
     prevRouteRef.current = route;
   }, [route]);
+
+  // Bumped on every route/options change. Used in the Polyline keys so they
+  // remount (and actually redraw) when the geometry changes — react-native-maps
+  // on iOS does not redraw a Polyline when only its coordinates prop updates.
+  const [routeVersion, setRouteVersion] = useState(0);
+  useEffect(() => {
+    setRouteVersion((v) => v + 1);
+  }, [route, routeOptions]);
 
   // Index of the currently selected route option (for highlighting).
   const selIndex = Math.max(0, routeOptions.indexOf(route));
@@ -152,12 +166,13 @@ export default function MapScreen({ navigation }) {
   async function routeTo(destination) {
     setBusy(true);
     try {
+      // planAndSetRoute already loads chargers near both the origin and the
+      // destination, so no separate refresh is needed here.
       const res = await planAndSetRoute(destination);
       if (!res.ok) {
         Alert.alert('Rota', res.error);
         return;
       }
-      refreshStationsNear(destination.lat, destination.lng);
     } catch (e) {
       Alert.alert('Erro', e.message || 'Falha ao calcular a rota.');
     } finally {
@@ -236,67 +251,74 @@ export default function MapScreen({ navigation }) {
           longitudeDelta: 0.08,
         }}
       >
-        {displayed.map((s) => (
-          <Marker
-            key={String(s.id)}
-            coordinate={{ latitude: s.lat, longitude: s.lng }}
-            onPress={() => onStationPress(s)}
-          >
-            <View
-              style={[
-                reportMode ? styles.pinReport : styles.pin,
-                { backgroundColor: statusColor(s.status) },
-              ]}
+        {/* Stations as lightning bolts. When a route is active they shrink so
+            the charging stop (rendered larger below) stands out. The charging
+            stop itself is skipped here to avoid drawing it twice. */}
+        {displayed
+          .filter((s) => !(route?.stopStation && s.id === route.stopStation.id))
+          .map((s) => (
+            <Marker
+              key={String(s.id)}
+              coordinate={{ latitude: s.lat, longitude: s.lng }}
+              onPress={() => onStationPress(s)}
+              anchor={BOLT_ANCHOR}
             >
-              <Text style={styles.pinTxt}>⚡</Text>
-            </View>
-          </Marker>
-        ))}
+              <StationIcon size={route ? 18 : 30} />
+            </Marker>
+          ))}
 
+        {/* Charging stop — kept large so it's the clear point to charge. */}
         {route?.stopStation && (
           <Marker
+            key={`stop-${routeVersion}`}
             coordinate={{ latitude: route.stopStation.lat, longitude: route.stopStation.lng }}
             onPress={() => navigation.navigate('StationDetail', { station: route.stopStation })}
+            anchor={BOLT_ANCHOR}
+            zIndex={4}
           >
-            <View
-              style={[
-                styles.pinBig,
-                { backgroundColor: route.analysis?.emergency ? colors.red : colors.yellow },
-              ]}
-            >
-              <Text style={styles.pinTxt}>⚡</Text>
-            </View>
+            <StationIcon size={42} />
           </Marker>
         )}
 
         {route?.destination && (
           <Marker
+            key={`dest-${routeVersion}`}
             coordinate={{ latitude: route.destination.lat, longitude: route.destination.lng }}
             title={route.destination.name}
+            anchor={{ x: 0.5, y: 0.5 }}
+            zIndex={4}
           >
-            <View style={[styles.pinBig, { backgroundColor: colors.red }]}>
-              <Text style={styles.pinTxt}>📍</Text>
-            </View>
+            <DestinationPin size={42} />
           </Marker>
         )}
 
-        {/* Route alternatives — non-selected drawn underneath, tappable */}
+        {/* Route alternatives — non-selected drawn underneath. Each has a wide
+            invisible hit-area polyline on top so the thin line is easy to tap. */}
         {routeOptions.map((opt, i) =>
           i === selIndex ? null : (
-            <Polyline
-              key={`alt-${i}`}
-              coordinates={opt.coords}
-              strokeColor="rgba(120,134,150,0.55)"
-              strokeWidth={5}
-              tappable
-              onPress={() => selectRouteOption(i)}
-              zIndex={1}
-            />
+            <React.Fragment key={`altwrap-${routeVersion}-${i}`}>
+              <Polyline
+                coordinates={opt.coords}
+                strokeColor="rgba(255,255,255,0.01)"
+                strokeWidth={28}
+                tappable
+                onPress={() => selectRouteOption(i)}
+                zIndex={2}
+              />
+              <Polyline
+                coordinates={opt.coords}
+                strokeColor="rgba(120,134,150,0.6)"
+                strokeWidth={5}
+                tappable
+                onPress={() => selectRouteOption(i)}
+                zIndex={1}
+              />
+            </React.Fragment>
           ),
         )}
         {route?.coords?.length ? (
           <Polyline
-            key={`sel-${selIndex}`}
+            key={`sel-${routeVersion}-${selIndex}`}
             coordinates={route.coords}
             strokeColor={colors.c2}
             strokeWidth={7}
@@ -312,7 +334,7 @@ export default function MapScreen({ navigation }) {
             const selected = i === selIndex;
             return (
               <Marker
-                key={`bubble-${i}`}
+                key={`bubble-${routeVersion}-${i}`}
                 coordinate={mid}
                 onPress={() => selectRouteOption(i)}
                 anchor={{ x: 0.5, y: 0.5 }}
@@ -320,7 +342,7 @@ export default function MapScreen({ navigation }) {
               >
                 <View style={[styles.bubble, selected ? styles.bubbleOn : styles.bubbleOff]}>
                   <Text style={[styles.bubbleTxt, selected ? styles.bubbleTxtOn : styles.bubbleTxtOff]}>
-                    {opt.durationText}
+                    {opt.belowMin ? '⚠️ ' : ''}{opt.durationText}
                   </Text>
                 </View>
               </Marker>

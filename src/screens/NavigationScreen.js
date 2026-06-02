@@ -273,6 +273,23 @@ export default function NavigationScreen({ navigation }) {
   const currentName = progress?.currentName;
   const showFloaters = sheetIdx <= 0; // hide when the end-trip sheet is expanded
 
+  // If the planned charging stop is now reported occupied, offer an alternative
+  // that takes the user's current position + remaining route into account.
+  const liveStop = route.stopStation ? stations.find((s) => s.id === route.stopStation.id) : null;
+  const stopOccupied = !arrived && liveStop && liveStop.status === 'occupied';
+
+  function findAlternative() {
+    if (route?.destination) {
+      // Reroute from the live position; the occupied stop is excluded and a
+      // free stop on the remaining route is chosen.
+      rerouteTo({
+        lat: route.destination.lat,
+        lng: route.destination.lng,
+        name: route.destination.name,
+      });
+    }
+  }
+
   return (
     <View style={s.container}>
       <MapView
@@ -403,6 +420,18 @@ export default function NavigationScreen({ navigation }) {
         <View style={s.recalcPill}>
           <ActivityIndicator size="small" color={colors.c2} />
           <Text style={s.recalcTxt}>A recalcular rota…</Text>
+        </View>
+      ) : null}
+
+      {/* Planned charging stop is occupied → offer an alternative on the route */}
+      {stopOccupied && !recalc ? (
+        <View style={[s.occupiedBar, { bottom: insets.bottom + 190 }]}>
+          <Text style={s.occupiedTxt} numberOfLines={2}>
+            ⚠️ {liveStop.name} está ocupado
+          </Text>
+          <TouchableOpacity style={s.occupiedBtn} onPress={findAlternative} activeOpacity={0.85}>
+            <Text style={s.occupiedBtnTxt}>Ver alternativa</Text>
+          </TouchableOpacity>
         </View>
       ) : null}
 
@@ -655,6 +684,30 @@ const s = StyleSheet.create({
     ...shadow.lg,
   },
   recalcTxt: { fontSize: 13, color: colors.text2, fontWeight: '700' },
+
+  // ─── Occupied-stop banner ───
+  occupiedBar: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.red,
+    paddingLeft: 16,
+    paddingRight: 10,
+    paddingVertical: 12,
+    borderRadius: 16,
+    ...shadow.lg,
+  },
+  occupiedTxt: { flex: 1, color: '#fff', fontSize: 14, fontWeight: '700' },
+  occupiedBtn: {
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 12,
+  },
+  occupiedBtnTxt: { color: '#fff', fontSize: 13, fontWeight: '800' },
 
   // ─── Bottom sheet ───
   sheetBg: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24 },

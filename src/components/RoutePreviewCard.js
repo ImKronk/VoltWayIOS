@@ -18,6 +18,16 @@ function tollLabel(route) {
   return 'Sem portagens';
 }
 
+// Live traffic note (from the TomTom-refined ETA). Falls back to a neutral
+// label when traffic data isn't available.
+function trafficLabel(route) {
+  if (route.trafficDelaySec == null) return 'Trânsito habitual';
+  const min = Math.round(route.trafficDelaySec / 60);
+  if (route.trafficLevel === 'heavy') return `🚦 Trânsito intenso · +${min} min`;
+  if (route.trafficLevel === 'moderate') return `🚦 Algum trânsito · +${min} min`;
+  return '🟢 Trânsito fluido';
+}
+
 export default function RoutePreviewCard({
   route,
   onStart,
@@ -144,9 +154,18 @@ export default function RoutePreviewCard({
           <Text style={[s.note, route.analysis.emergency && s.noteEmergency]} numberOfLines={1}>
             {route.analysis.emergency ? '🚨' : '⚡'} Paragem: {route.stopStation.name}
           </Text>
-        ) : (
-          <Text style={s.note}>Trânsito habitual</Text>
-        )}
+        ) : null}
+        {route.belowMin ? (
+          <Text style={[s.note, s.noteEmergency]} numberOfLines={1}>
+            ⚠️ Rota mais eficiente — bateria desce a {route.stopArrivalBatt}% (abaixo do mínimo)
+          </Text>
+        ) : null}
+        <Text
+          style={[s.note, route.trafficLevel === 'heavy' && s.noteEmergency]}
+          numberOfLines={1}
+        >
+          {trafficLabel(route)}
+        </Text>
 
         {auto ? (
           <Text style={s.autoHint}>Início automático em {remaining}s · toca para cancelar</Text>
